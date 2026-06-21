@@ -449,6 +449,12 @@ function thirdTotal(ym){return txsOfMonth(ym,'expense').filter(isThird).reduce((
 function thirdPending(ym){return txsOfMonth(ym,'expense').filter(t=>isThird(t)&&!t.reimbursed).reduce((s,t)=>s+t.amount,0);}
 function thirdReceived(ym){return txsOfMonth(ym,'expense').filter(t=>isThird(t)&&t.reimbursed).reduce((s,t)=>s+t.amount,0);}
 
+/* Receita "efetiva" do mês = receitas lançadas + reembolsos de terceiros já recebidos.
+   Assim, o cartão emprestado entra UMA vez como despesa (na fatura) e, ao marcar
+   "recebido" na aba Terceiros, o valor de volta é contado como entrada
+   automaticamente — sem precisar relançar nada como receita. */
+function incomeEffective(ym){return monthTotal(ym,'income')+thirdReceived(ym);}
+
 /* agrupa gastos de terceiros por pessoa, no mês */
 function thirdByPerson(ym){
   const m={};
@@ -629,10 +635,11 @@ function dismissMonthlyCopy(ym){
 
 function renderHome(){
   const ym=state.ui.month;
-  const incomeM=monthTotal(ym,'income');
+  const incomeM=incomeEffective(ym);
   const expenseM=expenseTotal(ym);
   const ownM=expenseOwn(ym);
   const thirdPend=thirdPending(ym);
+  const thirdRec=thirdReceived(ym);
   const saldo=incomeM-expenseM;
 
   // faturas abertas (não pagas) e total
@@ -685,7 +692,7 @@ function renderHome(){
       <div class="pill"><div class="t"><span class="dot bg-up"></span>Receitas</div><div class="v up num">${fmtBRL(incomeM)}</div></div>
       <div class="pill"><div class="t"><span class="dot bg-down"></span>Despesas</div><div class="v down num">${fmtBRL(expenseM)}</div></div>
     </div>
-    ${thirdPend>0?`<small class="note">Inclui <b>${fmtBRL(thirdPend)}</b> de terceiros (cartão emprestado) a receber. Suas despesas líquidas: <b>${fmtBRL(ownM)}</b>.</small>`:''}
+    ${(thirdPend>0||thirdRec>0)?`<small class="note">${thirdRec>0?`Inclui <b>${fmtBRL(thirdRec)}</b> de reembolso de terceiros já recebido (entra como receita). `:''}${thirdPend>0?`Ainda há <b>${fmtBRL(thirdPend)}</b> a receber de terceiros. `:''}Suas despesas líquidas: <b>${fmtBRL(ownM)}</b>.</small>`:''}
   </div>`;
 
   // carimbo de última atualização + status de sincronização
@@ -949,7 +956,7 @@ function barsSVG(hist){
 function renderTx(){
   const ym=state.ui.month;
   const list=state.txs.filter(t=>ymOf(parseDate(t.date))===ym).sort((a,b)=>b.date.localeCompare(a.date)||b.id.localeCompare(a.id));
-  const inc=monthTotal(ym,'income'), exp=monthTotal(ym,'expense');
+  const inc=incomeEffective(ym), exp=monthTotal(ym,'expense');
   let html=`<div class="card"><div class="pills" style="margin-top:0">
     <div class="pill"><div class="t"><span class="dot bg-up"></span>Receitas</div><div class="v up num">${fmtBRL(inc)}</div></div>
     <div class="pill"><div class="t"><span class="dot bg-down"></span>Despesas</div><div class="v down num">${fmtBRL(exp)}</div></div>
@@ -1160,7 +1167,7 @@ function renderMore(){
     <input type="file" id="importFile" accept="application/json,.json" style="display:none">
     <button class="btn danger mt12" onclick="confirmClear()">🗑️ Limpar todos os dados</button>
   </div>`;
-  html+=`<small class="note">Meu Bolso · dados salvos localmente (localStorage). Convenção de fatura no estilo Mobills: compra após o dia de fechamento entra na fatura do mês seguinte.</small>`;
+  html+=`<small class="note">Meu Bolso · v1.1 · dados salvos localmente (localStorage). Convenção de fatura no estilo Mobills: compra após o dia de fechamento entra na fatura do mês seguinte.</small>`;
 
   el('view-more').innerHTML=html;
   el('view-more').querySelectorAll('[data-cat]').forEach(n=>n.onclick=()=>openCategorySheet(n.dataset.cat));
@@ -1237,7 +1244,7 @@ function drawTxSheet(editing){
       <label class="between"><span>👥 Gasto de terceiro</span>
         <input type="checkbox" id="txThirdOn" ${e.thirdParty?'checked':''} style="width:auto;transform:scale(1.3)"></label>
       <input id="txThird" placeholder="Nome de quem usou (ex.: Mãe, João)" value="${escapeHTML(e.thirdParty||'')}" style="margin-top:8px;${e.thirdParty?'':'display:none'}">
-      <div class="hint">Use quando emprestar o cartão. O valor entra na fatura, mas é acumulado como “a receber” no fechamento de reembolso.</div>
+      <div class="hint">Use quando emprestar o cartão (ex.: mãe, irmã). O valor entra na fatura como despesa e fica como “a receber”. Quando a pessoa te pagar, marque “recebido” na aba 👥 Terceiros — aí ele vira receita automaticamente e o saldo se zera. Você lança só uma vez.</div>
     </div>`;
   }
 
@@ -1425,10 +1432,13 @@ function saveLoan(editId){
 }
 
 /* ----- Categoria ----- */
-function openCategorySheet(editId){
+function openCategorySheet(editId,keep){
   const e=editId?getCategory(editId):null;
-  resetSheet({catType:e?e.type:'expense',catIcon:e?e.icon:'📦',catColor:e?e.color:'#ff6b81'});
-  const icons=['🍔','🛒','🚗','🏠','💡','💊','🎬','📚','📦','💰','💻','📈','🎁','✈️','🐶','👕','💅','⚽','📱','☕'];
+  // 'keep' é usado ao apenas redesenhar a tela (ex.: trocar Despesa/Receita) para
+  // não perder a seleção já feita pelo usuário. Sem 'keep', usa os padrões.
+  resetSheet(keep||{catType:e?e.type:'expense',catIcon:e?e.icon:'📦',catColor:e?e.color:'#ff6b81'});
+  sheetState.catEditId=editId||null;
+  const icons=['🍔','🍕','🍣','☕','🍺','🛒','🧺','🚗','⛽','🚌','🚕','🏍️','✈️','🏠','🏢','🛋️','💡','🚿','🌐','📶','💊','🩺','🦷','🏥','🧘','🎬','🎮','🎵','🎟️','🏖️','⚽','🏋️','📚','🎓','✏️','📦','👕','👟','💅','💇','🐶','🐱','🎁','🍼','🧸','🔧','🧹','🐾','💳','🧾','💸','🤝','💰','💵','🪙','🏦','📈','📊','🏆','💼','🧑‍💻','💻','📱','🏷️','♻️','➕'];
   let html=`<div class="grip"></div><h2>${e?'Editar categoria':'Nova categoria'}</h2>
     <div class="seg" style="margin-bottom:12px">
       <button class="${sheetState.catType==='expense'?'on expense':''}" onclick="sheetState.catType='expense';refreshCatSeg()">Despesa</button>
@@ -1450,7 +1460,8 @@ function colorPickerCat(sel){
 }
 function refreshCatSeg(){ // só atualiza visual do seg sem perder dados digitados
   const name=el('catName').value;
-  openCategorySheet(); el('catName').value=name;
+  openCategorySheet(sheetState.catEditId||null,{catType:sheetState.catType,catIcon:sheetState.catIcon,catColor:sheetState.catColor});
+  el('catName').value=name;
 }
 function saveCategory(editId){
   const name=el('catName').value.trim(); if(!name){toast('Informe o nome');return;}
@@ -1601,7 +1612,7 @@ function toggleThird(ym,name){
 function nc(n){return (Number(n)||0).toFixed(2).replace('.',',');} // número p/ Excel BR (vírgula decimal)
 function exportExcel(ym){
   const items=buildChecklist(ym);
-  const inc=monthTotal(ym,'income'), exp=expenseTotal(ym), own=expenseOwn(ym), saldo=inc-exp;
+  const inc=incomeEffective(ym), exp=expenseTotal(ym), own=expenseOwn(ym), saldo=inc-exp;
   const orc=budgetTotalExpense(ym), real=realByCategory(ym), b=getBudget(ym);
   const txs=state.txs.filter(t=>ymOf(parseDate(t.date))===ym).sort((a,b)=>a.date.localeCompare(b.date));
   const sty=`<style>td,th{border:1px solid #ccc;padding:4px 8px;font-family:Arial} th{background:#1d2530;color:#fff} .t{background:#eef} .r{text-align:right}</style>`;
@@ -1638,7 +1649,7 @@ function exportExcel(ym){
   toast('Relatório Excel gerado ✓');
 }
 function buildWhatsAppText(ym){
-  const inc=monthTotal(ym,'income'), exp=expenseTotal(ym), own=expenseOwn(ym), saldo=inc-exp;
+  const inc=incomeEffective(ym), exp=expenseTotal(ym), own=expenseOwn(ym), saldo=inc-exp;
   const orc=budgetTotalExpense(ym); const agg=cardsAggregate();
   let fat=0; for(const c of cards()){if(!isInvoicePaid(c.id,ym))fat+=invoiceTotal(c.id,ym);}
   const byCat=groupExpenseByCategory(ym).slice(0,3);
@@ -2049,7 +2060,7 @@ driveStartupSync();
     // Service worker: cache do próprio documento p/ abrir offline.
     if('serviceWorker' in navigator && location.protocol.startsWith('http')){
       const swCode = `
-        const CACHE='meubolso-v1';
+        const CACHE='meubolso-v2';
         self.addEventListener('install', e=>{ self.skipWaiting(); });
         self.addEventListener('activate', e=>{ e.waitUntil(self.clients.claim()); });
         self.addEventListener('fetch', e=>{
