@@ -205,6 +205,30 @@ small.note{display:block; color:var(--muted); font-size:11.5px; line-height:1.5;
 .qa span{font-size:20px}
 .qa:active{background:var(--surface-2)}
 
+/* seleção de contas mensais a copiar */
+.mcp-row{display:flex; align-items:center; gap:12px; padding:12px 2px; border-bottom:1px solid var(--line); cursor:pointer}
+.mcp-row:last-child{border-bottom:none}
+.mcp-row .meta{flex:1; min-width:0}
+.mcp-row .ttl{font-weight:600; font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.mcp-row .sub{color:var(--muted); font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.mcp-row .amt{font-weight:700; font-size:14px; white-space:nowrap}
+.mcp-chk{width:20px; height:20px; accent-color:var(--brand); flex:none}
+
+/* fluxo de caixa diário */
+.cf-day{margin-top:14px}
+.cf-day .cf-head{display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin:0 2px 6px}
+.cf-day .cf-date{font-weight:700; font-size:14px}
+.cf-day .cf-date small{color:var(--muted); font-weight:600; margin-left:6px}
+.cf-day .cf-bal{font-weight:700; font-size:14px}
+.cf-ev{display:flex; align-items:center; gap:10px; padding:9px 2px; border-bottom:1px solid var(--line)}
+.cf-ev:last-child{border-bottom:none}
+.cf-ev .meta{flex:1; min-width:0}
+.cf-ev .ttl{font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.cf-ev .sub{color:var(--muted); font-size:12px}
+.cf-ev .amt{font-weight:700; font-size:14px; white-space:nowrap}
+.cf-today{outline:2px solid var(--brand); outline-offset:2px; border-radius:12px}
+.cf-neg{color:var(--expense)!important}
+
 /* barras de progresso (orçamento / limite) */
 .prog{height:9px; border-radius:6px; background:var(--surface-2); overflow:hidden}
 .prog > i{display:block; height:100%; border-radius:6px; background:var(--brand); transition:width .3s}
@@ -254,6 +278,8 @@ small.note{display:block; color:var(--muted); font-size:11.5px; line-height:1.5;
   <main class="view active" id="view-home"></main>
   <!-- ===== LANÇAR (input diário) ===== -->
   <main class="view" id="view-input"></main>
+  <!-- ===== FLUXO DE CAIXA (diário) ===== -->
+  <main class="view" id="view-cashflow"></main>
   <!-- ===== EXTRATO (todas as transações) ===== -->
   <main class="view" id="view-ledger"></main>
   <!-- ===== TRANSAÇÕES (mês) ===== -->
@@ -274,7 +300,7 @@ small.note{display:block; color:var(--muted); font-size:11.5px; line-height:1.5;
 
 <nav class="nav">
   <button data-tab="home" class="on"><span class="em">🏠</span>Início</button>
-  <button data-tab="input"><span class="em">➕</span>Lançar</button>
+  <button data-tab="cashflow"><span class="em">📊</span>Fluxo</button>
   <span class="gap"></span>
   <button data-tab="ledger"><span class="em">📒</span>Extrato</button>
   <button data-tab="more"><span class="em">☰</span>Mais</button>
@@ -410,6 +436,18 @@ function load(){
   if(!state.meta) state.meta={lastInput:null,lastSync:null,updatedAt:Date.now()};
   if(state.meta.updatedAt===undefined) state.meta.updatedAt=Date.now();
   if(!state.budgets) state.budgets={}; // compatibilidade com backups antigos
+  // Migração: empréstimos antigos sem parcelas materializadas -> gera despesas reais.
+  try{
+    for(const ln of (state.accounts||[]).filter(a=>a.type==='loan')){
+      const hasTxs=state.txs.some(t=>t.loanId===ln.id);
+      if(!hasTxs && ln.installments && ln.firstDate){
+        syncLoanTxs(ln);
+        // converte status "pago" antigo (paidInstallments) em settled
+        const wasPaid=new Set(ln.paidInstallments||[]);
+        for(const t of state.txs.filter(t=>t.loanId===ln.id)){ if(wasPaid.has(t.loanNo)) t.settled=true; }
+      }
+    }
+  }catch(e){ console.error('Migração de empréstimos falhou',e); }
 }
 function save(autoSync=true){
   try{
@@ -509,15 +547,8 @@ function buildChecklist(ym){
       title:'Fatura '+c.name,sub:'Cartão · vence '+fmtDateBR(dueISO(ym,c.closingDay,c.dueDay)),
       amount:tot,done:isInvoicePaid(c.id,ym),kind:'invoice',cardId:c.id,ym,icon:'💳',color:c.color||'#9b8cff'});
   }
-  // parcelas de empréstimo com vencimento no mês
-  for(const ln of loans()){
-    for(let i=1;i<=ln.installments;i++){
-      const d=addMonthsYM(ln.firstDate.slice(0,7),i-1); if(d!==ym)continue;
-      const[y,m]=d.split('-').map(Number); const last=new Date(y,m,0).getDate(); const day=Math.min(parseDate(ln.firstDate).getDate(),last);
-      items.push({id:'loan:'+ln.id+':'+i,dir:'out',date:d+'-'+pad2(day),title:'Parcela '+i+'/'+ln.installments+' · '+ln.name,
-        sub:'Empréstimo',amount:ln.installmentValue,done:(ln.paidInstallments||[]).includes(i),kind:'loan',loanId:ln.id,no:i,icon:'🏦',color:'#9b8cff'});
-    }
-  }
+  // parcelas de empréstimo: agora são despesas reais (kind 'expense' com loanId)
+  // e já entram pelo laço de "despesas que NÃO são de cartão" acima.
   // reembolsos de terceiros (a receber)
   for(const p of thirdByPerson(ym)){
     items.push({id:'tp:'+ym+':'+p.name,dir:'in',date:ym+'-28',title:'Receber de '+p.name,
@@ -549,6 +580,7 @@ function renderAll(){
   // título conforme aba
   const titles={home:['Início','Visão geral do mês'],tx:['Lançamentos','Receitas e despesas'],
     input:['Lançar','Adicione seus gastos e receitas'],ledger:['Extrato','Todas as transações'],
+    cashflow:['Fluxo de caixa','Projeção diária do mês'],
     cards:['Cartões','Faturas e limites'],more:['Mais','Cadastros e configurações'],
     budget:['Orçamento','Planejamento do mês'],closing:['Fechamento','Checklist do mês'],
     thirdparty:['Terceiros','Gastos a receber']};
@@ -560,6 +592,7 @@ function renderAll(){
   if(activeTab==='tx') renderTx();
   if(activeTab==='input') renderInput();
   if(activeTab==='ledger') renderLedger();
+  if(activeTab==='cashflow') renderCashflow();
   if(activeTab==='cards') renderCards();
   if(activeTab==='more') renderMore();
   if(activeTab==='budget') renderBudget();
@@ -610,8 +643,9 @@ function pendingMonthlyToCopy(ym){
   }
   return out;
 }
-function copyMonthlyFromPrev(ym){
-  const pend=pendingMonthlyToCopy(ym);
+function copyMonthlyFromPrev(ym, groups){
+  let pend=pendingMonthlyToCopy(ym);
+  if(Array.isArray(groups)){ const set=new Set(groups); pend=pend.filter(t=>set.has(t.monthlyGroup)); }
   if(!pend.length){ toast('Nada a copiar'); return; }
   for(const src of pend){
     const acc=getAccount(src.accountId);
@@ -625,7 +659,42 @@ function copyMonthlyFromPrev(ym){
     if(acc && acc.type==='card' && src.kind==='expense') t.invoiceMonth=invoiceMonthFor(iso,acc.closingDay);
     state.txs.push(t);
   }
-  touchInput(); save(); toast(`${pend.length} conta(s) mensal(is) copiada(s) ✓`); renderAll();
+  touchInput(); save(); toast(`${pend.length} conta(s) mensal(is) copiada(s) ✓`); closeSheet(); renderAll();
+}
+// Abre a planilha de seleção: o usuário escolhe QUAIS receitas/despesas mensais copiar.
+function openMonthlyCopySheet(ym){
+  const pend=pendingMonthlyToCopy(ym);
+  if(!pend.length){ toast('Nada a copiar'); return; }
+  const inc=pend.filter(t=>t.kind==='income');
+  const exp=pend.filter(t=>t.kind==='expense');
+  const rowHTML=t=>{
+    const cat=getCategory(t.categoryId); const acc=getAccount(t.accountId);
+    const sign=t.kind==='income'?'+':'−'; const cls=t.kind==='income'?'up':'down';
+    const nome=escapeHTML(t.monthlyName||t.description||(cat?cat.name:'Conta'));
+    return `<label class="mcp-row">
+      <input type="checkbox" class="mcp-chk" data-g="${escapeHTML(t.monthlyGroup)}" checked>
+      <div class="ic" style="background:${cat?cat.color:'#8b97a7'}">${cat?cat.icon:'•'}</div>
+      <div class="meta"><div class="ttl">${nome}</div>
+        <div class="sub">${acc?escapeHTML(acc.name):'—'}${cat?' · '+escapeHTML(cat.name):''}</div></div>
+      <div class="amt ${cls} num">${sign} ${fmtNum(t.amount)}</div>
+    </label>`;
+  };
+  let html=`<div class="grip"></div><h2>Copiar para ${ymLabel(ym)}</h2>
+    <div class="hint" style="margin:-4px 2px 10px">Selecione o que deseja repetir neste mês. O que ficar desmarcado não será criado.</div>`;
+  html+=`<div class="btnrow" style="margin-bottom:6px">
+    <button class="btn ghost sm" style="flex:1" onclick="mcpToggleAll(true)">Marcar todas</button>
+    <button class="btn ghost sm" style="flex:1" onclick="mcpToggleAll(false)">Desmarcar todas</button></div>`;
+  if(exp.length){ html+=`<div class="section-title" style="margin-top:8px">Despesas mensais</div><div class="card"><div class="list mcp-list">`+exp.map(rowHTML).join('')+`</div></div>`; }
+  if(inc.length){ html+=`<div class="section-title">Receitas mensais</div><div class="card"><div class="list mcp-list">`+inc.map(rowHTML).join('')+`</div></div>`; }
+  html+=`<button class="btn primary mt8" onclick="confirmMonthlyCopy('${ym}')">Copiar selecionadas</button>`;
+  html+=`<button class="btn ghost mt8" onclick="closeSheet()">Cancelar</button>`;
+  openSheet(html);
+}
+function mcpToggleAll(v){ el('sheet').querySelectorAll('.mcp-chk').forEach(c=>c.checked=v); }
+function confirmMonthlyCopy(ym){
+  const groups=[...el('sheet').querySelectorAll('.mcp-chk')].filter(c=>c.checked).map(c=>c.dataset.g);
+  if(!groups.length){ toast('Nenhuma selecionada'); return; }
+  copyMonthlyFromPrev(ym, groups);
 }
 function dismissMonthlyCopy(ym){
   if(!state.ui.monthlyDismissed) state.ui.monthlyDismissed=[];
@@ -679,7 +748,7 @@ function renderHome(){
         </div>
       </div>
       <div class="row2" style="margin-top:10px">
-        <button class="btn primary" style="flex:1" onclick="copyMonthlyFromPrev('${ym}')">Copiar ${monthlyPend.length}</button>
+        <button class="btn primary" style="flex:1" onclick="openMonthlyCopySheet('${ym}')">Escolher e copiar</button>
         <button class="btn ghost" style="flex:1" onclick="dismissMonthlyCopy('${ym}')">Agora não</button>
       </div>
     </div>`;
@@ -1076,10 +1145,16 @@ function renderMore(){
   let html='';
   // atalhos para as telas que não estão na barra inferior
   html+=`<div class="qarow">
+    <button class="qa" onclick="switchTab('input')"><span>✍️</span>Lançar rápido</button>
     <button class="qa" onclick="switchTab('tx')"><span>📄</span>Lançamentos</button>
     <button class="qa" onclick="switchTab('budget')"><span>🎯</span>Orçamento</button>
     <button class="qa" onclick="switchTab('thirdparty')"><span>👥</span>Terceiros</button>
-    <button class="qa" onclick="exportExcel(state.ui.month)"><span>📊</span>Excel</button>
+  </div>`;
+  html+=`<div class="qarow" style="margin-top:8px">
+    <button class="qa" onclick="switchTab('cashflow')"><span>📊</span>Fluxo</button>
+    <button class="qa" onclick="switchTab('closing')"><span>✅</span>Fechamento</button>
+    <button class="qa" onclick="switchTab('cards')"><span>💳</span>Cartões</button>
+    <button class="qa" onclick="exportExcel(state.ui.month)"><span>📈</span>Excel</button>
   </div>`;
   // Empréstimos
   html+=`<div class="section-title">Empréstimos e financiamentos</div>`;
@@ -1087,8 +1162,9 @@ function renderMore(){
   if(lns.length){
     html+=`<div class="card"><div class="list">`;
     for(const ln of lns){
-      const paid=(ln.paidInstallments||[]).length; const rem=ln.installments-paid;
-      const saldo=rem*ln.installmentValue; const pct=Math.round(paid/ln.installments*100);
+      const ltxs=state.txs.filter(t=>t.loanId===ln.id);
+      const paid=ltxs.filter(t=>t.settled).length; const rem=ln.installments-paid;
+      const saldo=ltxs.filter(t=>!t.settled).reduce((s,t)=>s+t.amount,0); const pct=Math.round(paid/ln.installments*100);
       const next=nextLoanInstallment(ln);
       html+=`<div class="item" data-loan="${ln.id}">
         <div class="ic" style="background:#9b8cff">🏦</div>
@@ -1099,7 +1175,7 @@ function renderMore(){
     }
     html+=`</div></div>`;
   } else html+=`<div class="card empty" style="padding:20px"><span class="em">🏦</span>Nenhum empréstimo cadastrado.</div>`;
-  html+=`<div class="btnrow"><button class="btn ghost sm" onclick="openAccountSheet('loan')">+ Novo empréstimo</button></div>`;
+  html+=`<div class="btnrow"><button class="btn ghost sm" onclick="openLoanSheet()">+ Novo empréstimo</button></div>`;
 
   // Contas
   html+=`<div class="section-title">Contas</div>`;
@@ -1176,9 +1252,42 @@ function renderMore(){
   const imp=el('importFile'); if(imp) imp.onchange=importData;
 }
 function nextLoanInstallment(ln){
-  const paid=new Set(ln.paidInstallments||[]);
-  for(let i=1;i<=ln.installments;i++){ if(!paid.has(i)){ const ym=addMonthsYM(ln.firstDate.slice(0,7),i-1); const[y,m]=ym.split('-').map(Number); const last=new Date(y,m,0).getDate(); const day=Math.min(parseDate(ln.firstDate).getDate(),last); return {no:i,date:ym+'-'+pad2(day)}; } }
+  // Próxima parcela em aberto, derivada das despesas reais geradas para o empréstimo.
+  const lt=state.txs.filter(t=>t.loanId===ln.id && !t.settled).sort((a,b)=>(a.loanNo||0)-(b.loanNo||0));
+  if(lt.length) return {no:lt[0].loanNo, date:lt[0].date};
   return null;
+}
+/* ---- Empréstimos: parcelas viram DESPESAS REAIS (uma por mês) ---- */
+// Garante a categoria padrão de empréstimos (cria só uma vez).
+function ensureLoanCategory(){
+  let c=state.categories.find(x=>x.type==='expense' && x.name==='Empréstimos/Financiamentos');
+  if(!c){ c={id:uid(),name:'Empréstimos/Financiamentos',type:'expense',icon:'🏦',color:'#9b8cff'}; state.categories.push(c); }
+  return c.id;
+}
+// Cria/atualiza/remove as txs de parcela para refletir os dados atuais do empréstimo.
+// Preserva o status "pago" (settled) de cada parcela pelo número (loanNo).
+function syncLoanTxs(ln){
+  const catId=ensureLoanCategory();
+  const baseDay=parseDate(ln.firstDate).getDate();
+  const existing=new Map(state.txs.filter(t=>t.loanId===ln.id).map(t=>[t.loanNo,t]));
+  for(let i=1;i<=ln.installments;i++){
+    const ym=addMonthsYM(ln.firstDate.slice(0,7),i-1);
+    const[y,m]=ym.split('-').map(Number); const last=new Date(y,m,0).getDate();
+    const iso=ym+'-'+pad2(Math.min(baseDay,last));
+    const ex=existing.get(i);
+    const desc='Parcela '+i+'/'+ln.installments+' · '+ln.name;
+    if(ex){
+      ex.amount=ln.installmentValue; ex.date=iso; ex.accountId=ln.debitAccountId||null;
+      ex.categoryId=catId; ex.description=desc; ex.loanInstallments=ln.installments;
+      existing.delete(i);
+    }else{
+      state.txs.push({id:uid(),kind:'expense',amount:ln.installmentValue,accountId:ln.debitAccountId||null,
+        categoryId:catId,date:iso,description:desc,note:'',thirdParty:'',
+        loanId:ln.id,loanNo:i,loanInstallments:ln.installments,settled:false});
+    }
+  }
+  // remove parcelas excedentes (caso o nº de parcelas tenha diminuído)
+  for(const[,ex] of existing){ state.txs=state.txs.filter(t=>t.id!==ex.id); }
 }
 
 /* ============================================================
@@ -1389,6 +1498,13 @@ function saveAccount(editId){
   save();toast('Conta salva ✓');closeSheet();renderAll();
 }
 function deleteAccount(id){
+  const a=getAccount(id);
+  if(a&&a.type==='loan'){
+    if(!confirm('Excluir este empréstimo e todas as parcelas geradas?')) return;
+    state.txs=state.txs.filter(t=>t.loanId!==id);
+    state.accounts=state.accounts.filter(x=>x.id!==id);
+    save();toast('Empréstimo excluído');closeSheet();renderAll();return;
+  }
   const used=state.txs.some(t=>t.accountId===id);
   if(used && !confirm('Há lançamentos vinculados. Excluir mesmo assim? (os lançamentos NÃO serão apagados, mas ficarão sem fonte)')) return;
   state.accounts=state.accounts.filter(a=>a.id!==id);
@@ -1397,6 +1513,8 @@ function deleteAccount(id){
 
 function openLoanSheet(editId){
   const e=editId?getAccount(editId):null;
+  const accs=plainAccounts();
+  const accOpts=`<option value="">— Não debitar de conta —</option>`+accs.map(a=>`<option value="${a.id}" ${e?.debitAccountId===a.id?'selected':''}>${escapeHTML(a.name)}</option>`).join('');
   let html=`<div class="grip"></div><h2>${e?'Empréstimo':'Novo empréstimo / financiamento'}</h2>
     <div class="field"><label>Nome</label><input id="lnName" placeholder="Ex.: Financiamento carro" value="${escapeHTML(e?.name||'')}"></div>
     <div class="field"><div class="row2">
@@ -1406,29 +1524,30 @@ function openLoanSheet(editId){
     <div class="field"><div class="row2">
       <div style="flex:1"><label>Taxa de juros % (opcional)</label><input id="lnRate" inputmode="decimal" placeholder="a.m." value="${e?.interest??''}"></div>
       <div style="flex:1"><label>Data da 1ª parcela</label><input id="lnDate" type="date" value="${e?.firstDate||todayISO()}"></div>
-    </div></div>`;
+    </div></div>
+    <div class="field"><label>Debitar parcelas de (conta)</label>
+      <select id="lnAcc">${accOpts}</select>
+      <div class="hint">Cada parcela vira uma despesa no respectivo mês. Se escolher uma conta, o saldo dela é reduzido a cada parcela.</div></div>`;
   if(e){
-    // marcar parcelas pagas
-    const paid=new Set(e.paidInstallments||[]);
-    html+=`<div class="field"><label>Parcelas pagas (toque para marcar)</label><div class="chips" id="lnPaid">`;
-    for(let i=1;i<=e.installments;i++) html+=`<button type="button" class="chip-opt ${paid.has(i)?'on':''}" data-p="${i}">${i}</button>`;
-    html+=`</div></div>`;
+    const paid=state.txs.filter(t=>t.loanId===e.id && t.settled).length;
+    html+=`<div class="hint" style="margin:2px 2px 8px">${paid}/${e.installments} parcela(s) já marcada(s) como paga(s). Marque/desmarque no <b>Fechamento</b> ou no <b>Fluxo de caixa</b>.</div>`;
   }
   html+=`<button class="btn primary mt8" onclick="saveLoan(${editId?`'${editId}'`:'null'})">${e?'Salvar':'Adicionar'}</button>`;
   if(e) html+=`<button class="btn danger mt8" onclick="deleteAccount('${editId}')">Excluir</button>`;
   html+=`<button class="btn ghost mt8" onclick="closeSheet()">Cancelar</button>`;
   openSheet(html);
-  if(e){const set=new Set(e.paidInstallments||[]);el('lnPaid').querySelectorAll('[data-p]').forEach(n=>n.onclick=()=>{const k=+n.dataset.p;if(set.has(k)){set.delete(k);n.classList.remove('on');}else{set.add(k);n.classList.add('on');}sheetState.paid=[...set];});sheetState.paid=[...set];}
 }
 function saveLoan(editId){
   const name=el('lnName').value.trim(); if(!name){toast('Informe o nome');return;}
   const installments=Math.max(1,+el('lnN').value||1);
   const installmentValue=parseMoney(el('lnVal').value);
   const data={name,installments,installmentValue,interest:el('lnRate').value?parseMoney(el('lnRate').value):null,
-    firstDate:el('lnDate').value||todayISO(),total:installments*installmentValue};
-  if(editId){const ln=getAccount(editId);Object.assign(ln,data);ln.paidInstallments=(sheetState.paid||ln.paidInstallments||[]).filter(i=>i<=installments);}
-  else state.accounts.push(Object.assign({id:uid(),type:'loan',paidInstallments:[]},data));
-  save();toast('Empréstimo salvo ✓');closeSheet();renderAll();
+    firstDate:el('lnDate').value||todayISO(),debitAccountId:el('lnAcc').value||null,total:installments*installmentValue};
+  let ln;
+  if(editId){ ln=getAccount(editId); Object.assign(ln,data); }
+  else { ln=Object.assign({id:uid(),type:'loan',paidInstallments:[]},data); state.accounts.push(ln); }
+  syncLoanTxs(ln); // gera/atualiza as parcelas como despesas reais
+  save();toast(editId?'Empréstimo salvo ✓':`Empréstimo criado · ${installments} parcela(s) gerada(s) ✓`);closeSheet();renderAll();
 }
 
 /* ----- Categoria ----- */
@@ -1862,6 +1981,128 @@ function renderLedger(){
 }
 
 /* ============================================================
+   FLUXO DE CAIXA DIÁRIO (projeção)
+   Mostra, dia a dia, entradas e saídas previstas e o SALDO PROJETADO
+   ao fim de cada dia — para você ver se haverá dinheiro p/ pagar uma conta.
+   ============================================================ */
+// Saldo em caixa (contas comuns) carregado para ANTES do 1º dia do mês.
+function cashCarriedBefore(firstISO){
+  let b=0;
+  for(const a of plainAccounts()){
+    b += a.openingBalance||0;
+    for(const t of state.txs){ if(t.accountId===a.id && t.date < firstISO){ b += t.kind==='income'? t.amount : -t.amount; } }
+  }
+  for(const p of state.invoicePayments){ const acc=getAccount(p.fromAccountId); if(acc && acc.type==='account' && p.date && p.date < firstISO) b-=p.amount; }
+  return b;
+}
+// Eventos de caixa do mês: receitas, despesas que não são de cartão (inclui
+// parcelas de empréstimo) e o pagamento das faturas no respectivo vencimento.
+function cashEvents(ym){
+  const ev=[];
+  for(const t of txsOfMonth(ym,'income')){
+    const cat=getCategory(t.categoryId);
+    ev.push({date:t.date, dir:'in', amount:t.amount, title:t.description||(cat?cat.name:'Receita'),
+      sub:(getAccount(t.accountId)?.name||''), icon:cat?.icon||'💰', settled:!!t.settled});
+  }
+  for(const t of txsOfMonth(ym,'expense')){
+    const acc=getAccount(t.accountId); if(acc && acc.type==='card') continue; // cartão sai via fatura
+    const cat=getCategory(t.categoryId);
+    ev.push({date:t.date, dir:'out', amount:t.amount, title:t.description||(cat?cat.name:'Despesa'),
+      sub:(acc?acc.name:'—'), icon:t.loanId?'🏦':(cat?.icon||'💸'), settled:!!t.settled});
+  }
+  // faturas de cartão cujo VENCIMENTO cai neste mês
+  for(const c of cards()){
+    for(const off of [-2,-1,0]){ // fatura pode fechar em meses anteriores e vencer agora
+      const invYM=addMonthsYM(ym,off);
+      const tot=invoiceTotal(c.id,invYM); if(tot<=0) continue;
+      const due=dueISO(invYM,c.closingDay,c.dueDay);
+      if(ymOf(parseDate(due))!==ym) continue;
+      ev.push({date:due, dir:'out', amount:tot, title:'Fatura '+c.name,
+        sub:'Cartão · '+ymLabelShort(invYM), icon:'💳', settled:isInvoicePaid(c.id,invYM)});
+    }
+  }
+  ev.sort((a,b)=>a.date.localeCompare(b.date));
+  return ev;
+}
+function renderCashflow(){
+  const ym=state.ui.month;
+  const[y,m]=ym.split('-').map(Number);
+  const lastDay=new Date(y,m,0).getDate();
+  const firstISO=ym+'-01';
+  const start=cashCarriedBefore(firstISO);
+  const ev=cashEvents(ym);
+  const totalIn=ev.filter(e=>e.dir==='in').reduce((s,e)=>s+e.amount,0);
+  const totalOut=ev.filter(e=>e.dir==='out').reduce((s,e)=>s+e.amount,0);
+  const endBal=start+totalIn-totalOut;
+  // menor saldo do mês (ponto de aperto)
+  let run=start, minBal=start, minDate=firstISO;
+  const byDay={};
+  for(const e of ev){ (byDay[e.date]=byDay[e.date]||[]).push(e); }
+  for(let d=1; d<=lastDay; d++){
+    const iso=ym+'-'+pad2(d);
+    for(const e of (byDay[iso]||[])){ run += e.dir==='in'? e.amount : -e.amount; }
+    if(run<minBal){ minBal=run; minDate=iso; }
+  }
+
+  let html='';
+  if(!plainAccounts().length){
+    html+=`<div class="card empty" style="padding:22px"><span class="em">📊</span>
+      Cadastre ao menos uma <b>conta</b> (carteira/banco) para projetar o fluxo de caixa.
+      <div class="btnrow" style="justify-content:center;margin-top:10px"><button class="btn ghost sm" onclick="openAccountSheet('account')">+ Nova conta</button></div></div>`;
+    el('view-cashflow').innerHTML=html; return;
+  }
+
+  // Resumo do mês
+  html+=`<div class="card balance">
+    <div class="label">Saldo projetado ao fim de ${ymLabel(ym)}</div>
+    <div class="big num ${endBal>=0?'up':'down'}">${endBal<0?'−':''}${fmtBRL(Math.abs(endBal))}</div>
+    <div class="pills">
+      <div class="pill"><div class="t">Saldo inicial</div><div class="v num ${start>=0?'up':'down'}">${fmtBRL(start)}</div></div>
+      <div class="pill"><div class="t"><span class="dot bg-up"></span>Entradas</div><div class="v up num">${fmtBRL(totalIn)}</div></div>
+      <div class="pill"><div class="t"><span class="dot bg-down"></span>Saídas</div><div class="v down num">${fmtBRL(totalOut)}</div></div>
+    </div>
+    ${minBal<0?`<small class="note" style="color:var(--expense)">⚠️ O saldo fica <b>negativo</b> (${fmtBRL(minBal)}) por volta de <b>${fmtDateBR(minDate)}</b>. Pode faltar dinheiro para as contas dessa data.</small>`
+      :`<small class="note">Menor saldo do mês: <b>${fmtBRL(minBal)}</b> em ${fmtDateBR(minDate)}.</small>`}
+  </div>`;
+
+  html+=`<div class="hint" style="margin:14px 2px 4px">Projeção considerando contas (carteira/banco), parcelas de empréstimo e o vencimento das faturas. Compras no cartão entram apenas na data da fatura.</div>`;
+
+  if(!ev.length){
+    html+=`<div class="card empty" style="padding:22px"><span class="em">🗓️</span>Sem movimentações previstas neste mês.</div>`;
+    el('view-cashflow').innerHTML=html; return;
+  }
+
+  // Dia a dia (somente dias com eventos)
+  const todayIso=todayISO();
+  run=start;
+  for(let d=1; d<=lastDay; d++){
+    const iso=ym+'-'+pad2(d);
+    const list=byDay[iso]||[];
+    if(!list.length) continue;
+    for(const e of list){ run += e.dir==='in'? e.amount : -e.amount; }
+    const dayIn=list.filter(e=>e.dir==='in').reduce((s,e)=>s+e.amount,0);
+    const dayOut=list.filter(e=>e.dir==='out').reduce((s,e)=>s+e.amount,0);
+    const wd=['dom','seg','ter','qua','qui','sex','sáb'][parseDate(iso).getDay()];
+    html+=`<div class="card cf-day ${iso===todayIso?'cf-today':''}">
+      <div class="cf-head">
+        <div class="cf-date">${pad2(d)}/${pad2(m)} <small>${wd}${dayIn?' · +'+fmtNum(dayIn):''}${dayOut?' · −'+fmtNum(dayOut):''}</small></div>
+        <div class="cf-bal ${run<0?'cf-neg':(run>=0?'up':'down')}">${run<0?'−':''}${fmtBRL(Math.abs(run))}</div>
+      </div>`;
+    for(const e of list){
+      const sign=e.dir==='in'?'+':'−'; const cls=e.dir==='in'?'up':'down';
+      html+=`<div class="cf-ev">
+        <div class="ic" style="background:var(--surface-2)">${e.icon}</div>
+        <div class="meta"><div class="ttl">${escapeHTML(e.title)} ${e.settled?'<span class="tag ok">pago</span>':''}</div>
+          <div class="sub">${escapeHTML(e.sub||'')}</div></div>
+        <div class="amt ${cls} num">${sign} ${fmtNum(e.amount)}</div>
+      </div>`;
+    }
+    html+=`</div>`;
+  }
+  el('view-cashflow').innerHTML=html;
+}
+
+/* ============================================================
    GOOGLE DRIVE — sincronização (backup "na nuvem")
    Usa Google Identity Services (OAuth token) + Drive REST API.
    Escopo drive.file: o app só enxerga o arquivo que ele próprio cria
@@ -2021,7 +2262,7 @@ el('mPrev').onclick=()=>{state.ui.month=addMonthsYM(state.ui.month,-1);save();re
 el('mNext').onclick=()=>{state.ui.month=addMonthsYM(state.ui.month,1);save();renderAll();};
 el('scrim').onclick=closeSheet;
 // expõe funções usadas em onclick inline
-Object.assign(window,{openAccountSheet,openCategorySheet,openLoanSheet,openTxSheet,saveTx,deleteTx,saveCard,saveAccount,saveLoan,deleteAccount,saveCategory,deleteCategory,refreshCatSeg,openCardInvoice,openPayInvoice,confirmPay,undoPay,setTheme,exportData,importData,confirmClear,drawTxSheet,closeSheet,sheetState,el,switchTab,copyBudgetFrom,exportExcel,openWhatsApp,sendWhatsApp,copyWhatsApp,toggleThird,renderInput,setInputType,addInputTx,renderLedger,setLedgerType,renderMore,driveManualSync,drivePushNow,drivePullNow,driveDisconnect,saveDriveClientId,toggleDriveAuto,copyMonthlyFromPrev,dismissMonthlyCopy,pendingMonthlyToCopy});
+Object.assign(window,{openAccountSheet,openCategorySheet,openLoanSheet,openTxSheet,saveTx,deleteTx,saveCard,saveAccount,saveLoan,deleteAccount,saveCategory,deleteCategory,refreshCatSeg,openCardInvoice,openPayInvoice,confirmPay,undoPay,setTheme,exportData,importData,confirmClear,drawTxSheet,closeSheet,sheetState,el,switchTab,copyBudgetFrom,exportExcel,openWhatsApp,sendWhatsApp,copyWhatsApp,toggleThird,renderInput,setInputType,addInputTx,renderLedger,setLedgerType,renderMore,driveManualSync,drivePushNow,drivePullNow,driveDisconnect,saveDriveClientId,toggleDriveAuto,copyMonthlyFromPrev,dismissMonthlyCopy,pendingMonthlyToCopy,openMonthlyCopySheet,confirmMonthlyCopy,mcpToggleAll,renderCashflow});
 // bind dinâmico do color picker quando sheets de conta abrem
 const _openSheet=openSheet;
 openSheet=function(h){_openSheet(h);bindColorPicker();};
