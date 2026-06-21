@@ -351,14 +351,14 @@ function parseMoney(str){
 // Compra no dia <= dia de fechamento entra na fatura que fecha NESTE mês;
 // compra APÓS o fechamento entra na fatura do mês seguinte.
 function invoiceMonthFor(dateStr, closingDay){
-  const d=parseDate(dateStr); const day=d.getDate(); let ym=ymOf(d);
-  if(day>closingDay) ym=addMonthsYM(ym,1);
-  return ym;
+  // Convenção do usuário: a fatura é identificada pelo MÊS DO LANÇAMENTO.
+  // (Você lança a compra já no mês em que pretende pagá-la.)
+  return ymOf(parseDate(dateStr));
 }
-// Vencimento: se diaVenc > diaFech, vence no mês do fechamento; senão, no mês seguinte.
+// Vencimento: no dia informado, DENTRO do próprio mês da fatura (ex.: fatura de
+// agosto vence 02/08). closingDay é mantido apenas como informação no cadastro.
 function dueDateFor(invoiceYM, closingDay, dueDay){
-  let ym=invoiceYM; if(dueDay<=closingDay) ym=addMonthsYM(ym,1);
-  const[y,m]=ym.split('-').map(Number); const last=new Date(y,m,0).getDate();
+  const[y,m]=invoiceYM.split('-').map(Number); const last=new Date(y,m,0).getDate();
   return new Date(y,m-1,Math.min(dueDay,last));
 }
 function dueISO(invoiceYM,closingDay,dueDay){const d=dueDateFor(invoiceYM,closingDay,dueDay);return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());}
@@ -1299,6 +1299,15 @@ function openSheet(html){el('sheet').innerHTML=html;el('scrim').classList.add('o
 function closeSheet(){el('scrim').classList.remove('on');el('sheet').classList.remove('on');}
 
 /* ----- Lançamento (novo/editar) ----- */
+// Data padrão do formulário: usa HOJE se o mês selecionado for o atual;
+// caso contrário, usa o mesmo dia dentro do mês selecionado (ex.: vendo
+// agosto, a compra já nasce em agosto e cai na fatura de agosto).
+function defaultTxDate(){
+  const ym=state.ui.month, today=todayISO();
+  if(today.slice(0,7)===ym) return today;
+  const[y,m]=ym.split('-').map(Number); const last=new Date(y,m,0).getDate();
+  return ym+'-'+pad2(Math.min(parseDate(today).getDate(),last));
+}
 function openTxSheet(txId){
   const editing=txId?state.txs.find(t=>t.id===txId):null;
   resetSheet({kind:editing?editing.kind:'expense'});
@@ -1323,7 +1332,7 @@ function drawTxSheet(editing){
       <select id="txAcc">${accs.map(a=>`<option value="${a.id}" ${e.accountId===a.id?'selected':''}>${a.type==='card'?'💳 ':'🏦 '}${escapeHTML(a.name)}</option>`).join('')}
       ${accs.length?'':'<option value="">Cadastre uma conta/cartão primeiro</option>'}</select></div>
     <div class="field"><div class="row2">
-      <div style="flex:1"><label>Data</label><input id="txDate" type="date" value="${e.date||todayISO()}"></div>
+      <div style="flex:1"><label>Data</label><input id="txDate" type="date" value="${e.date||defaultTxDate()}"></div>
       <div style="flex:1"><label>Descrição</label><input id="txDesc" placeholder="opcional" value="${escapeHTML((e.description||'').replace(/\s*\(\d+\/\d+\)$/,''))}"></div>
     </div></div>
     <div class="field"><label>Observação (opcional)</label><input id="txObs" placeholder="Ex.: Cesta básica, cobra dia 5..." value="${escapeHTML(e.note||'')}"></div>`;
@@ -1460,7 +1469,7 @@ function openAccountSheet(type,editId){
       <div class="field"><div class="row2">
         <div style="flex:1"><label>Dia de fechamento</label><input id="acClose" type="number" min="1" max="31" value="${e?.closingDay||10}"></div>
         <div style="flex:1"><label>Dia de vencimento</label><input id="acDue" type="number" min="1" max="31" value="${e?.dueDay||20}"></div>
-      </div><div class="hint">Compras feitas após o fechamento caem na fatura do mês seguinte.</div></div>
+      </div><div class="hint">A fatura é identificada pelo <b>mês do lançamento</b> e vence no dia informado <b>desse mesmo mês</b> (ex.: lançou em agosto → vence em agosto). O dia de fechamento fica só como referência.</div></div>
       ${colorPicker(e?.color||'#9b8cff')}
       <button class="btn primary mt8" onclick="saveCard(${editId?`'${editId}'`:'null'})">${e?'Salvar':'Adicionar cartão'}</button>`;
   } else if(type==='account'){
@@ -1836,6 +1845,8 @@ function shade(hex,amt){try{let c=hex.replace('#','');if(c.length===3)c=c.split(
 let inputForm={type:'expense', date:todayISO(), accountId:null, catId:null, recent:[], _focus:false};
 function setInputType(t){ inputForm.type=t; inputForm.catId=null; renderInput(); }
 function renderInput(){
+  // mantém a data do formulário coerente com o mês selecionado (nova convenção)
+  if((inputForm.date||'').slice(0,7)!==state.ui.month) inputForm.date=defaultTxDate();
   const accs = inputForm.type==='expense'
     ? state.accounts.filter(a=>a.type!=='loan')
     : state.accounts.filter(a=>a.type==='account');
@@ -2010,16 +2021,12 @@ function cashEvents(ym){
     ev.push({date:t.date, dir:'out', amount:t.amount, title:t.description||(cat?cat.name:'Despesa'),
       sub:(acc?acc.name:'—'), icon:t.loanId?'🏦':(cat?.icon||'💸'), settled:!!t.settled});
   }
-  // faturas de cartão cujo VENCIMENTO cai neste mês
+  // faturas de cartão do mês: a despesa entra na data de vencimento
   for(const c of cards()){
-    for(const off of [-2,-1,0]){ // fatura pode fechar em meses anteriores e vencer agora
-      const invYM=addMonthsYM(ym,off);
-      const tot=invoiceTotal(c.id,invYM); if(tot<=0) continue;
-      const due=dueISO(invYM,c.closingDay,c.dueDay);
-      if(ymOf(parseDate(due))!==ym) continue;
-      ev.push({date:due, dir:'out', amount:tot, title:'Fatura '+c.name,
-        sub:'Cartão · '+ymLabelShort(invYM), icon:'💳', settled:isInvoicePaid(c.id,invYM)});
-    }
+    const tot=invoiceTotal(c.id,ym); if(tot<=0) continue;
+    const due=dueISO(ym,c.closingDay,c.dueDay);
+    ev.push({date:due, dir:'out', amount:tot, title:'Fatura '+c.name,
+      sub:'Cartão · vence '+fmtDateBR(due), icon:'💳', settled:isInvoicePaid(c.id,ym)});
   }
   ev.sort((a,b)=>a.date.localeCompare(b.date));
   return ev;
