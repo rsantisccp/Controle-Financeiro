@@ -479,7 +479,16 @@ function accountBalance(accId){
 /* ---------- DESPESAS: total x próprias x terceiros ----------
    Gastos de "terceiros" (cartão emprestado p/ família) entram na sua fatura,
    mas você será reembolsado — então separamos para não inflar SEU orçamento. */
-function txsOfMonth(ym,kind){return state.txs.filter(t=>t.kind===kind&&ymOf(parseDate(t.date))===ym);}
+// Mês "efetivo" de um lançamento para os totais do mês:
+//  - despesa de CARTÃO pertence ao mês da sua FATURA (invoiceMonth);
+//    isso garante que cada parcela conte no mês certo, mesmo todas
+//    compartilhando a data original da compra.
+//  - os demais lançamentos seguem o mês da própria data.
+function txMonthOf(t){
+  if(t.kind==='expense' && t.invoiceMonth) return t.invoiceMonth;
+  return ymOf(parseDate(t.date));
+}
+function txsOfMonth(ym,kind){return state.txs.filter(t=>t.kind===kind&&txMonthOf(t)===ym);}
 function isThird(t){return !!(t.thirdParty&&String(t.thirdParty).trim());}
 function expenseTotal(ym){return txsOfMonth(ym,'expense').reduce((s,t)=>s+t.amount,0);}        // tudo
 function expenseOwn(ym){return txsOfMonth(ym,'expense').filter(t=>!isThird(t)).reduce((s,t)=>s+t.amount,0);} // só seus
@@ -931,15 +940,15 @@ function renderHome(){
   el('view-home').querySelectorAll('[data-card]').forEach(n=>n.onclick=()=>{switchTab('cards');setTimeout(()=>openCardInvoice(n.dataset.card,state.ui.month),60);});
 }
 
-function monthTotal(ym,kind){return state.txs.filter(t=>t.kind===kind&&ymOf(parseDate(t.date))===ym).reduce((s,t)=>s+t.amount,0);}
+function monthTotal(ym,kind){return state.txs.filter(t=>t.kind===kind&&txMonthOf(t)===ym).reduce((s,t)=>s+t.amount,0);}
 function groupExpenseByCategory(ym){
   const m={};
-  for(const t of state.txs){ if(t.kind==='expense'&&ymOf(parseDate(t.date))===ym){ m[t.categoryId]=(m[t.categoryId]||0)+t.amount; } }
+  for(const t of state.txs){ if(t.kind==='expense'&&txMonthOf(t)===ym){ m[t.categoryId]=(m[t.categoryId]||0)+t.amount; } }
   return Object.entries(m).map(([id,value])=>{const c=getCategory(id)||{name:'?',color:'#8b97a7'};return{name:c.name,color:c.color,value};}).sort((a,b)=>b.value-a.value);
 }
 function groupExpenseBySource(ym){
   const m={};
-  for(const t of state.txs){ if(t.kind==='expense'&&ymOf(parseDate(t.date))===ym){ m[t.accountId]=(m[t.accountId]||0)+t.amount; } }
+  for(const t of state.txs){ if(t.kind==='expense'&&txMonthOf(t)===ym){ m[t.accountId]=(m[t.accountId]||0)+t.amount; } }
   return Object.entries(m).map(([id,value])=>{const a=getAccount(id)||{name:'?',color:'#8b97a7'};return{name:a.name,color:a.color||'#8b97a7',icon:a.type==='card'?'💳':'🏦',value};}).sort((a,b)=>b.value-a.value);
 }
 function monthlyHistory(ym,n){
@@ -977,7 +986,7 @@ function buildAlerts(ym){
 function buildInsights(ym,income,expense,faturas){
   const out=[];
   // % em cartão
-  const cardSpend=state.txs.filter(t=>t.kind==='expense'&&ymOf(parseDate(t.date))===ym&&getAccount(t.accountId)?.type==='card').reduce((s,t)=>s+t.amount,0);
+  const cardSpend=state.txs.filter(t=>t.kind==='expense'&&txMonthOf(t)===ym&&getAccount(t.accountId)?.type==='card').reduce((s,t)=>s+t.amount,0);
   if(expense>0) out.push({icon:'💳',color:'#5aa7ff',text:`<b>${Math.round(cardSpend/expense*100)}%</b> dos seus gastos do mês foram no cartão de crédito.`});
   // comparação mês anterior
   const prev=monthTotal(addMonthsYM(ym,-1),'expense');
@@ -1024,7 +1033,7 @@ function barsSVG(hist){
 /* =================== TRANSAÇÕES =================== */
 function renderTx(){
   const ym=state.ui.month;
-  const list=state.txs.filter(t=>ymOf(parseDate(t.date))===ym).sort((a,b)=>b.date.localeCompare(a.date)||b.id.localeCompare(a.id));
+  const list=state.txs.filter(t=>txMonthOf(t)===ym).sort((a,b)=>b.date.localeCompare(a.date)||b.id.localeCompare(a.id));
   const inc=incomeEffective(ym), exp=monthTotal(ym,'expense');
   let html=`<div class="card"><div class="pills" style="margin-top:0">
     <div class="pill"><div class="t"><span class="dot bg-up"></span>Receitas</div><div class="v up num">${fmtBRL(inc)}</div></div>
@@ -1742,7 +1751,7 @@ function exportExcel(ym){
   const items=buildChecklist(ym);
   const inc=incomeEffective(ym), exp=expenseTotal(ym), own=expenseOwn(ym), saldo=inc-exp;
   const orc=budgetTotalExpense(ym), real=realByCategory(ym), b=getBudget(ym);
-  const txs=state.txs.filter(t=>ymOf(parseDate(t.date))===ym).sort((a,b)=>a.date.localeCompare(b.date));
+  const txs=state.txs.filter(t=>txMonthOf(t)===ym).sort((a,b)=>a.date.localeCompare(b.date));
   const sty=`<style>td,th{border:1px solid #ccc;padding:4px 8px;font-family:Arial} th{background:#1d2530;color:#fff} .t{background:#eef} .r{text-align:right}</style>`;
   let h=`<html><head><meta charset="UTF-8">${sty}</head><body>`;
   h+=`<h2>Meu Bolso — Relatório de ${ymLabel(ym)}</h2>`;
