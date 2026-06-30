@@ -499,9 +499,10 @@ function thirdReceived(ym){return txsOfMonth(ym,'expense').filter(t=>isThird(t)&
 /* Receita "efetiva" do mês = receitas lançadas + TODOS os gastos de terceiros.
    Modelo de REPASSE: o gasto de terceiro (ex.: cartão emprestado) entra como
    despesa e, simultaneamente, como receita — mesmo que ainda esteja "a receber".
-   Resultado: ele NUNCA pesa no seu balanço (sempre se anula). O acompanhamento de
-   quem já pagou x quem ainda deve fica na aba 👥 Terceiros (e no Fluxo de caixa,
-   que só conta como entrada de caixa o que estiver marcado como "recebido"). */
+   Resultado: ele NUNCA pesa no seu balanço (sempre se anula). O mesmo vale no
+   Fluxo de caixa: a saída do terceiro gera uma entrada de contrapartida (repasse),
+   então o gasto não afeta o saldo projetado. O acompanhamento de quem já pagou x
+   quem ainda deve fica na aba 👥 Terceiros (lá o status "a receber"/"recebido"). */
 function incomeEffective(ym){return monthTotal(ym,'income')+thirdTotal(ym);}
 
 /* agrupa gastos de terceiros por pessoa, no mês */
@@ -2039,15 +2040,18 @@ function cashEvents(ym){
     ev.push({date:due, dir:'out', amount:tot, title:'Fatura '+c.name,
       sub:'Cartão · vence '+fmtDateBR(due), icon:'💳', settled:isInvoicePaid(c.id,ym)});
   }
-  // reembolsos de terceiros JÁ RECEBIDOS: o dinheiro volta p/ o caixa (ENTRADA).
-  // A saída do gasto já está contabilizada (na fatura, p/ cartão; no próprio dia,
-  // p/ conta comum), então a entrada do reembolso anula o efeito do empréstimo.
+  // gastos de terceiros (REPASSE): toda saída de terceiro gera uma ENTRADA de
+  // contrapartida — coerente com a tela Início (o gasto entra como receita mesmo
+  // que ainda esteja "a receber"). A saída já está contabilizada (na fatura, p/
+  // cartão; no próprio dia, p/ conta comum), então essa entrada a anula no caixa.
+  // O status reflete a realidade: 'recebido' (settled) x 'a receber' (pendente).
   for(const t of txsOfMonth(ym,'expense')){
-    if(!isThird(t) || !t.reimbursed) continue;
+    if(!isThird(t)) continue;
     const acc=getAccount(t.accountId);
     const inDate = (acc && acc.type==='card') ? dueISO(ym,acc.closingDay,acc.dueDay) : t.date;
-    ev.push({date:inDate, dir:'in', amount:t.amount, title:'Reembolso · '+t.thirdParty,
-      sub:'Terceiro devolveu', icon:'👥', settled:true});
+    ev.push({date:inDate, dir:'in', amount:t.amount,
+      title:(t.reimbursed?'Reembolso · ':'Repasse · ')+t.thirdParty,
+      sub:t.reimbursed?'Terceiro devolveu':'A receber (repasse)', icon:'👥', settled:!!t.reimbursed});
   }
   ev.sort((a,b)=>a.date.localeCompare(b.date));
   return ev;
