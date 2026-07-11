@@ -2043,12 +2043,13 @@ function cashEvents(ym){
   // gastos de terceiros (REPASSE): toda saída de terceiro gera uma ENTRADA de
   // contrapartida — coerente com a tela Início (o gasto entra como receita mesmo
   // que ainda esteja "a receber"). A saída já está contabilizada (na fatura, p/
-  // cartão; no próprio dia, p/ conta comum), então essa entrada a anula no caixa.
+  // cartão; no próprio dia, p/ conta comum). A entrada de contrapartida é sempre
+  // lançada no DIA 5 do mês (recebimento consolidado dos terceiros), independente
+  // de ser cartão ou conta comum.
   // O status reflete a realidade: 'recebido' (settled) x 'a receber' (pendente).
   for(const t of txsOfMonth(ym,'expense')){
     if(!isThird(t)) continue;
-    const acc=getAccount(t.accountId);
-    const inDate = (acc && acc.type==='card') ? dueISO(ym,acc.closingDay,acc.dueDay) : t.date;
+    const inDate = ym+'-05'; // recebimento de TODOS os terceiros consolidado no dia 5 do mês
     ev.push({date:inDate, dir:'in', amount:t.amount,
       title:(t.reimbursed?'Reembolso · ':'Repasse · ')+t.thirdParty,
       sub:t.reimbursed?'Terceiro devolveu':'A receber (repasse)', icon:'👥', settled:!!t.reimbursed});
