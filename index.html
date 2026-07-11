@@ -2047,12 +2047,23 @@ function cashEvents(ym){
   // lançada no DIA 5 do mês (recebimento consolidado dos terceiros), independente
   // de ser cartão ou conta comum.
   // O status reflete a realidade: 'recebido' (settled) x 'a receber' (pendente).
+  // Consolida por PESSOA (e por status recebido/a receber), somando os valores:
+  // uma única entrada por terceiro no dia 5, em vez de uma linha por lançamento.
+  const inDate = ym+'-05'; // recebimento de TODOS os terceiros consolidado no dia 5 do mês
+  const thirdAgg={};
   for(const t of txsOfMonth(ym,'expense')){
     if(!isThird(t)) continue;
-    const inDate = ym+'-05'; // recebimento de TODOS os terceiros consolidado no dia 5 do mês
-    ev.push({date:inDate, dir:'in', amount:t.amount,
-      title:(t.reimbursed?'Reembolso · ':'Repasse · ')+t.thirdParty,
-      sub:t.reimbursed?'Terceiro devolveu':'A receber (repasse)', icon:'👥', settled:!!t.reimbursed});
+    const rec=!!t.reimbursed;
+    const name=String(t.thirdParty).trim();
+    const key=(rec?'R|':'P|')+name; // separa 'recebido' de 'a receber' da mesma pessoa
+    if(!thirdAgg[key]) thirdAgg[key]={amount:0, name, reimbursed:rec, count:0};
+    thirdAgg[key].amount+=t.amount; thirdAgg[key].count++;
+  }
+  for(const k in thirdAgg){ const g=thirdAgg[k];
+    ev.push({date:inDate, dir:'in', amount:g.amount,
+      title:(g.reimbursed?'Reembolso · ':'Repasse · ')+g.name,
+      sub:(g.reimbursed?'Terceiro devolveu':'A receber (repasse)')+(g.count>1?` · ${g.count} lançamentos`:''),
+      icon:'👥', settled:g.reimbursed});
   }
   ev.sort((a,b)=>a.date.localeCompare(b.date));
   return ev;
