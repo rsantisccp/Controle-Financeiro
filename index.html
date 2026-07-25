@@ -638,20 +638,27 @@ function escapeHTML(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&
 
 /* =================== DASHBOARD =================== */
 /* ---- Contas mensais recorrentes: detecção e cópia do mês anterior ---- */
-// Retorna as txs mensais do mês anterior cujo grupo ainda NÃO tem ocorrência no mês atual.
+// Retorna, para cada conta mensal (monthlyGroup) que ainda NÃO tem ocorrência no mês "ym",
+// a sua ocorrência mais recente em qualquer mês anterior a "ym". Isso garante que a sugestão
+// de cópia continue aparecendo mesmo que um ou mais meses tenham sido pulados sem copiar
+// (ex.: pulou Setembro → em Outubro ainda encontra a última vez que a conta apareceu, em Agosto).
 function pendingMonthlyToCopy(ym){
-  const prev=addMonthsYM(ym,-1);
-  const prevMonthly=state.txs.filter(t=>t.monthly && ymOf(parseDate(t.date))===prev);
-  if(!prevMonthly.length) return [];
+  const lastByGroup=new Map(); // monthlyGroup -> tx mais recente com mês < ym
+  for(const t of state.txs){
+    if(!t.monthly) continue;
+    const tYm=ymOf(parseDate(t.date));
+    if(tYm>=ym) continue; // só considera meses anteriores ao mês alvo
+    const atual=lastByGroup.get(t.monthlyGroup);
+    if(!atual || tYm>ymOf(parseDate(atual.date))) lastByGroup.set(t.monthlyGroup,t);
+  }
+  if(!lastByGroup.size) return [];
   const groupsThisMonth=new Set(
     state.txs.filter(t=>t.monthly && ymOf(parseDate(t.date))===ym).map(t=>t.monthlyGroup)
   );
-  // dedup por grupo
-  const seen=new Set(); const out=[];
-  for(const t of prevMonthly){
-    if(groupsThisMonth.has(t.monthlyGroup)) continue;     // já copiada
-    if(seen.has(t.monthlyGroup)) continue;
-    seen.add(t.monthlyGroup); out.push(t);
+  const out=[];
+  for(const [group,t] of lastByGroup){
+    if(groupsThisMonth.has(group)) continue; // já copiada neste mês
+    out.push(t);
   }
   return out;
 }
@@ -1168,6 +1175,17 @@ function renderMore(){
     <button class="qa" onclick="switchTab('cards')"><span>💳</span>Cartões</button>
     <button class="qa" onclick="exportExcel(state.ui.month)"><span>📈</span>Excel</button>
   </div>`;
+  // Contas mensais recorrentes (cópia manual, a qualquer momento)
+  html+=`<div class="section-title">Contas mensais recorrentes</div>`;
+  const monthlyPendMore = pendingMonthlyToCopy(state.ui.month);
+  html+=`<div class="card">
+    <div class="between"><div><b>🔁 Copiar contas mensais para ${ymLabel(state.ui.month)}</b>
+      <div class="muted" style="font-size:12.5px">${monthlyPendMore.length? monthlyPendMore.length+' conta(s) pendente(s) de cópia neste mês.' : 'Nenhuma pendência no momento — tudo copiado ou nada a repetir.'}</div></div>
+    </div>
+    <button class="btn ${monthlyPendMore.length?'primary':'ghost'} sm mt8" style="width:100%" onclick="openMonthlyCopySheet(state.ui.month)">Revisar e copiar agora</button>
+    <div class="hint">Use aqui se dispensou o aviso na Início ("Agora não") ou se pulou um mês sem copiar — o app sempre pede sua confirmação antes de criar qualquer lançamento, item por item.</div>
+  </div>`;
+
   // Empréstimos
   html+=`<div class="section-title">Empréstimos e financiamentos</div>`;
   const lns=loans();
