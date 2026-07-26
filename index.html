@@ -491,7 +491,7 @@ function txMonthOf(t){
 function txsOfMonth(ym,kind){return state.txs.filter(t=>t.kind===kind&&txMonthOf(t)===ym);}
 function isThird(t){return !!(t.thirdParty&&String(t.thirdParty).trim());}
 function expenseTotal(ym){return txsOfMonth(ym,'expense').reduce((s,t)=>s+t.amount,0);}        // tudo
-function expenseOwn(ym){return txsOfMonth(ym,'expense').filter(t=>!isThird(t)).reduce((s,t)=>s+t.amount,0);} // só seus
+function expenseOwn(ym){return txsOfMonth(ym,'expense').filter(t=>!isThird(t)&&!t.carryOver).reduce((s,t)=>s+t.amount,0);} // só seus (sem saldo anterior)
 function thirdTotal(ym){return txsOfMonth(ym,'expense').filter(isThird).reduce((s,t)=>s+t.amount,0);}
 function thirdPending(ym){return txsOfMonth(ym,'expense').filter(t=>isThird(t)&&!t.reimbursed).reduce((s,t)=>s+t.amount,0);}
 function thirdReceived(ym){return txsOfMonth(ym,'expense').filter(t=>isThird(t)&&t.reimbursed).reduce((s,t)=>s+t.amount,0);}
@@ -530,7 +530,7 @@ function getBudget(ym){return state.budgets[ym]||{};}
 function budgetIncome(ym){return (getBudget(ym)._income)||0;}
 function budgetTotalExpense(ym){const b=getBudget(ym);return Object.entries(b).filter(([k])=>k!=='_income').reduce((s,[,v])=>s+(+v||0),0);}
 function realByCategory(ym){ // gasto próprio por categoria
-  const m={}; for(const t of txsOfMonth(ym,'expense')){ if(isThird(t))continue; m[t.categoryId]=(m[t.categoryId]||0)+t.amount; } return m;
+  const m={}; for(const t of txsOfMonth(ym,'expense')){ if(isThird(t)||t.carryOver)continue; m[t.categoryId]=(m[t.categoryId]||0)+t.amount; } return m;
 }
 function setBudget(ym,catId,val){ if(!state.budgets[ym])state.budgets[ym]={}; if(val>0)state.budgets[ym][catId]=val; else delete state.budgets[ym][catId]; save(); }
 function copyBudgetFrom(ym,fromYm){ const src=state.budgets[fromYm]; if(!src){toast('Mês de origem sem orçamento');return;} state.budgets[ym]=JSON.parse(JSON.stringify(src)); save(); toast('Orçamento copiado ✓'); renderAll(); }
@@ -622,6 +622,7 @@ function txItemHTML(t){
   const tags=[];
   if(t.installmentTotal>1) tags.push(`<span class="tag">${t.installmentNo}/${t.installmentTotal}x</span>`);
   if(t.monthly) tags.push(`<span class="tag">🔁 mensal</span>`);
+  if(t.carryOver) tags.push(`<span class="tag">↩️ saldo anterior</span>`);
   if(t.recurring) tags.push(`<span class="tag">🔁 fixo</span>`);
   if(t.thirdParty&&String(t.thirdParty).trim()) tags.push(`<span class="tag ${t.reimbursed?'ok':'warn'}">👥 ${escapeHTML(t.thirdParty)}</span>`);
   return `<div class="item" data-tx="${t.id}">
@@ -662,10 +663,13 @@ function pendingMonthlyToCopy(ym){
   }
   return out;
 }
+// Copia as contas mensais selecionadas para "ym". Não mexe em toast/sheet/render —
+// isso fica a cargo de quem chama (confirmMonthlyCopy), para poder combinar com o
+// saldo do mês anterior num único toast/confirmação. Retorna a quantidade copiada.
 function copyMonthlyFromPrev(ym, groups){
   let pend=pendingMonthlyToCopy(ym);
   if(Array.isArray(groups)){ const set=new Set(groups); pend=pend.filter(t=>set.has(t.monthlyGroup)); }
-  if(!pend.length){ toast('Nada a copiar'); return; }
+  if(!pend.length) return 0;
   for(const src of pend){
     const acc=getAccount(src.accountId);
     const day=src.date.slice(8); const[y,m]=ym.split('-').map(Number);
@@ -678,12 +682,44 @@ function copyMonthlyFromPrev(ym, groups){
     if(acc && acc.type==='card' && src.kind==='expense') t.invoiceMonth=invoiceMonthFor(iso,acc.closingDay);
     state.txs.push(t);
   }
-  touchInput(); save(); toast(`${pend.length} conta(s) mensal(is) copiada(s) ✓`); closeSheet(); renderAll();
+  return pend.length;
 }
-// Abre a planilha de seleção: o usuário escolhe QUAIS receitas/despesas mensais copiar.
+
+/* ---- Saldo do mês anterior (sobrou/faltou): também pode ser "copiado" para o mês seguinte ---- */
+// Saldo apurado no mês anterior = receitas efetivas − despesas totais daquele mês
+// (a mesma conta do card "Balanço do mês"). Como esse cálculo é refeito a cada mês a
+// partir dos lançamentos reais, se o mês anterior já tiver recebido um saldo trazido
+// do mês retrasado, ele entra automaticamente nessa soma — o efeito "encadeia" mês a mês.
+// Retorna o valor (pode ser negativo) ou null se não houver nada relevante a oferecer:
+// mês anterior sem nenhum lançamento, saldo zerado, ou saldo já trazido para "ym".
+function pendingCarryOver(ym){
+  if(state.txs.some(t=>t.carryOver && ymOf(parseDate(t.date))===ym)) return null; // já trazido neste mês
+  const prev=addMonthsYM(ym,-1);
+  if(!state.txs.some(t=>txMonthOf(t)===prev)) return null; // mês anterior sem nenhum lançamento
+  const bal=incomeEffective(prev)-expenseTotal(prev);
+  if(Math.abs(bal)<0.005) return null; // nada relevante (zerado)
+  return bal;
+}
+// Cria o lançamento de saldo anterior em "ym" (dia 1º). De propósito SEM conta vinculada:
+// o dinheiro em si já está refletido no saldo acumulado de cada conta (accountBalance);
+// este lançamento serve só para o Balanço do mês e os demais indicadores mensais
+// considerarem o que sobrou ou faltou — evita contar o valor em dobro na conta.
+// Retorna true se criou, false se não havia nada pendente.
+function applyCarryOver(ym){
+  const bal=pendingCarryOver(ym);
+  if(bal===null) return false;
+  const prev=addMonthsYM(ym,-1);
+  state.txs.push({id:uid(), kind: bal>=0?'income':'expense', amount:Math.abs(bal),
+    date:ym+'-01', description:'Saldo do mês anterior ('+ymLabelShort(prev)+')',
+    carryOver:true, settled:true});
+  return true;
+}
+
+// Abre a planilha de seleção: contas mensais recorrentes + (se houver) o saldo do mês anterior.
 function openMonthlyCopySheet(ym){
   const pend=pendingMonthlyToCopy(ym);
-  if(!pend.length){ toast('Nada a copiar'); return; }
+  const carry=pendingCarryOver(ym);
+  if(!pend.length && carry===null){ toast('Nada a copiar'); return; }
   const inc=pend.filter(t=>t.kind==='income');
   const exp=pend.filter(t=>t.kind==='expense');
   const rowHTML=t=>{
@@ -700,6 +736,17 @@ function openMonthlyCopySheet(ym){
   };
   let html=`<div class="grip"></div><h2>Copiar para ${ymLabel(ym)}</h2>
     <div class="hint" style="margin:-4px 2px 10px">Selecione o que deseja repetir neste mês. O que ficar desmarcado não será criado.</div>`;
+  if(carry!==null){
+    const cls=carry>=0?'up':'down'; const prevLbl=ymLabelShort(addMonthsYM(ym,-1));
+    html+=`<div class="section-title" style="margin-top:8px">Saldo do mês anterior</div>
+      <div class="card"><label class="mcp-row">
+        <input type="checkbox" id="carryChk" checked>
+        <div class="ic" style="background:${carry>=0?'#2ee6a6':'#ff6b81'}">${carry>=0?'💰':'⚠️'}</div>
+        <div class="meta"><div class="ttl">Saldo de ${prevLbl}</div>
+          <div class="sub">${carry>=0?'Sobrou — será somado a':'Faltou — será descontado de'} ${ymLabel(ym)}</div></div>
+        <div class="amt ${cls} num">${carry<0?'−':'+'} ${fmtNum(Math.abs(carry))}</div>
+      </label></div>`;
+  }
   html+=`<div class="btnrow" style="margin-bottom:6px">
     <button class="btn ghost sm" style="flex:1" onclick="mcpToggleAll(true)">Marcar todas</button>
     <button class="btn ghost sm" style="flex:1" onclick="mcpToggleAll(false)">Desmarcar todas</button></div>`;
@@ -709,11 +756,24 @@ function openMonthlyCopySheet(ym){
   html+=`<button class="btn ghost mt8" onclick="closeSheet()">Cancelar</button>`;
   openSheet(html);
 }
-function mcpToggleAll(v){ el('sheet').querySelectorAll('.mcp-chk').forEach(c=>c.checked=v); }
+function mcpToggleAll(v){
+  el('sheet').querySelectorAll('.mcp-chk').forEach(c=>c.checked=v);
+  const cc=el('sheet').querySelector('#carryChk'); if(cc) cc.checked=v;
+}
+// Confirmação única: copia as contas mensais marcadas e/ou traz o saldo do mês anterior.
 function confirmMonthlyCopy(ym){
   const groups=[...el('sheet').querySelectorAll('.mcp-chk')].filter(c=>c.checked).map(c=>c.dataset.g);
-  if(!groups.length){ toast('Nenhuma selecionada'); return; }
-  copyMonthlyFromPrev(ym, groups);
+  const carryChk=el('sheet').querySelector('#carryChk');
+  const wantCarry=!!(carryChk && carryChk.checked);
+  if(!groups.length && !wantCarry){ toast('Nenhuma selecionada'); return; }
+  const n = groups.length ? copyMonthlyFromPrev(ym, groups) : 0;
+  const carried = wantCarry ? applyCarryOver(ym) : false;
+  if(n || carried){ touchInput(); save(); }
+  const parts=[];
+  if(n) parts.push(`${n} conta(s) mensal(is)`);
+  if(carried) parts.push('saldo do mês anterior');
+  toast(parts.length ? `Copiado: ${parts.join(' + ')} ✓` : 'Nada a copiar');
+  closeSheet(); renderAll();
 }
 function dismissMonthlyCopy(ym){
   if(!state.ui.monthlyDismissed) state.ui.monthlyDismissed=[];
@@ -752,18 +812,27 @@ function renderHome(){
 
   let html='';
 
-  // ── Pergunta: copiar contas mensais do mês anterior? ──
+  // ── Pergunta: copiar contas mensais e/ou saldo do mês anterior? ──
   const monthlyPend = pendingMonthlyToCopy(ym);
+  const carryPend = pendingCarryOver(ym);
   const dismissed = (state.ui.monthlyDismissed||[]).includes(ym);
-  if(monthlyPend.length && !dismissed){
-    const nomes = monthlyPend.map(t=>escapeHTML(t.monthlyName||t.description||'Conta')).slice(0,4).join(', ');
-    const extra = monthlyPend.length>4 ? ` +${monthlyPend.length-4}` : '';
+  if((monthlyPend.length || carryPend!==null) && !dismissed){
+    const bits=[];
+    if(monthlyPend.length){
+      const nomes = monthlyPend.map(t=>escapeHTML(t.monthlyName||t.description||'Conta')).slice(0,4).join(', ');
+      const extra = monthlyPend.length>4 ? ` +${monthlyPend.length-4}` : '';
+      bits.push(`${monthlyPend.length} conta(s) do mês anterior: ${nomes}${extra}`);
+    }
+    if(carryPend!==null){
+      const sinal = carryPend<0?'−':'+';
+      bits.push(`saldo de ${ymLabelShort(addMonthsYM(ym,-1))}: ${sinal} ${fmtBRL(Math.abs(carryPend))}`);
+    }
     html+=`<div class="card" style="border:1px solid var(--brand-dim);background:linear-gradient(180deg,var(--surface),var(--surface-2))">
       <div style="display:flex;gap:10px;align-items:flex-start">
         <div style="font-size:22px">🔁</div>
         <div style="flex:1">
-          <div style="font-weight:700">Copiar contas mensais para ${ymLabel(ym)}?</div>
-          <div class="sub" style="color:var(--muted);margin-top:2px">${monthlyPend.length} conta(s) do mês anterior: ${nomes}${extra}</div>
+          <div style="font-weight:700">Copiar para ${ymLabel(ym)}?</div>
+          <div class="sub" style="color:var(--muted);margin-top:2px">${bits.join(' · ')}</div>
         </div>
       </div>
       <div class="row2" style="margin-top:10px">
@@ -953,12 +1022,12 @@ function renderHome(){
 function monthTotal(ym,kind){return state.txs.filter(t=>t.kind===kind&&txMonthOf(t)===ym).reduce((s,t)=>s+t.amount,0);}
 function groupExpenseByCategory(ym){
   const m={};
-  for(const t of state.txs){ if(t.kind==='expense'&&txMonthOf(t)===ym){ m[t.categoryId]=(m[t.categoryId]||0)+t.amount; } }
+  for(const t of state.txs){ if(t.kind==='expense'&&!t.carryOver&&txMonthOf(t)===ym){ m[t.categoryId]=(m[t.categoryId]||0)+t.amount; } }
   return Object.entries(m).map(([id,value])=>{const c=getCategory(id)||{name:'?',color:'#8b97a7'};return{name:c.name,color:c.color,value};}).sort((a,b)=>b.value-a.value);
 }
 function groupExpenseBySource(ym){
   const m={};
-  for(const t of state.txs){ if(t.kind==='expense'&&txMonthOf(t)===ym){ m[t.accountId]=(m[t.accountId]||0)+t.amount; } }
+  for(const t of state.txs){ if(t.kind==='expense'&&!t.carryOver&&txMonthOf(t)===ym){ m[t.accountId]=(m[t.accountId]||0)+t.amount; } }
   return Object.entries(m).map(([id,value])=>{const a=getAccount(id)||{name:'?',color:'#8b97a7'};return{name:a.name,color:a.color||'#8b97a7',icon:a.type==='card'?'💳':'🏦',value};}).sort((a,b)=>b.value-a.value);
 }
 function monthlyHistory(ym,n){
@@ -1175,15 +1244,20 @@ function renderMore(){
     <button class="qa" onclick="switchTab('cards')"><span>💳</span>Cartões</button>
     <button class="qa" onclick="exportExcel(state.ui.month)"><span>📈</span>Excel</button>
   </div>`;
-  // Contas mensais recorrentes (cópia manual, a qualquer momento)
-  html+=`<div class="section-title">Contas mensais recorrentes</div>`;
+  // Contas mensais recorrentes + saldo do mês anterior (cópia manual, a qualquer momento)
+  html+=`<div class="section-title">Contas mensais e saldo anterior</div>`;
   const monthlyPendMore = pendingMonthlyToCopy(state.ui.month);
+  const carryPendMore = pendingCarryOver(state.ui.month);
+  const pendBitsMore=[];
+  if(monthlyPendMore.length) pendBitsMore.push(monthlyPendMore.length+' conta(s) mensal(is)');
+  if(carryPendMore!==null) pendBitsMore.push('saldo de '+ymLabelShort(addMonthsYM(state.ui.month,-1))+' ('+(carryPendMore<0?'−':'+')+' '+fmtBRL(Math.abs(carryPendMore))+')');
+  const temPendMore = monthlyPendMore.length || carryPendMore!==null;
   html+=`<div class="card">
-    <div class="between"><div><b>🔁 Copiar contas mensais para ${ymLabel(state.ui.month)}</b>
-      <div class="muted" style="font-size:12.5px">${monthlyPendMore.length? monthlyPendMore.length+' conta(s) pendente(s) de cópia neste mês.' : 'Nenhuma pendência no momento — tudo copiado ou nada a repetir.'}</div></div>
+    <div class="between"><div><b>🔁 Copiar para ${ymLabel(state.ui.month)}</b>
+      <div class="muted" style="font-size:12.5px">${temPendMore? pendBitsMore.join(' · ')+' pendente(s).' : 'Nenhuma pendência no momento — tudo copiado ou nada a repetir.'}</div></div>
     </div>
-    <button class="btn ${monthlyPendMore.length?'primary':'ghost'} sm mt8" style="width:100%" onclick="openMonthlyCopySheet(state.ui.month)">Revisar e copiar agora</button>
-    <div class="hint">Use aqui se dispensou o aviso na Início ("Agora não") ou se pulou um mês sem copiar — o app sempre pede sua confirmação antes de criar qualquer lançamento, item por item.</div>
+    <button class="btn ${temPendMore?'primary':'ghost'} sm mt8" style="width:100%" onclick="openMonthlyCopySheet(state.ui.month)">Revisar e copiar agora</button>
+    <div class="hint">Traz as contas mensais recorrentes e/ou o saldo (positivo ou negativo) apurado no mês anterior. Use aqui se dispensou o aviso na Início ("Agora não") ou se pulou um mês sem copiar — o app sempre pede sua confirmação antes de criar qualquer lançamento, item por item.</div>
   </div>`;
 
   // Empréstimos
