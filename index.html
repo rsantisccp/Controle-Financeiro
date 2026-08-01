@@ -385,6 +385,23 @@ function isInvoicePaid(cardId,ym){return state.invoicePayments.some(p=>p.cardId=
    ESTADO + PERSISTÊNCIA
    ============================================================ */
 const STORE_KEY='meubolso_v1';
+
+/* ============================================================
+   CONTROLE DE VERSÃO DO APP
+   Ao publicar uma nova versão no GitHub, altere SOMENTE estas 3 linhas.
+   - APP_VERSION alimenta o cache do service worker (força atualização
+     do app instalado), o "Sobre" na aba Mais e o registro em meta.appVersion.
+   - APP_CHANGELOG aparece no card "Sobre" como "Novidades desta versão".
+   ============================================================ */
+const APP_VERSION='1.10';
+const APP_DATE='01/08/2026';
+const APP_CHANGELOG=[
+  'Bloco “Saldo Atual” no Fechamento (bate com a conta corrente).',
+  'Busca e filtros (tipo, fonte, período) em Lançamentos, com saldo Receitas − Despesas.',
+  'Botão “Salvar e lançar nova” no formulário de lançamento.',
+  'Correção: comparativo mensal e histórico agora incluem os repasses de terceiros.',
+  'Controle de versão do app com verificação de atualização.'
+];
 let state=null;
 
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
@@ -436,6 +453,14 @@ function load(){
   if(!state.meta) state.meta={lastInput:null,lastSync:null,updatedAt:Date.now()};
   if(state.meta.updatedAt===undefined) state.meta.updatedAt=Date.now();
   if(!state.budgets) state.budgets={}; // compatibilidade com backups antigos
+  // ── controle de versão: registra qual versão do app gravou estes dados ──
+  if(!state.meta.appVersion){                 // primeira vez / backup antigo
+    state.meta.appVersion=APP_VERSION; state.meta.appVersionAt=Date.now();
+  } else if(state.meta.appVersion!==APP_VERSION){
+    state.meta.prevVersion=state.meta.appVersion;
+    state.meta.appVersion=APP_VERSION; state.meta.appVersionAt=Date.now();
+    setTimeout(()=>toast('Atualizado para a v'+APP_VERSION+' ✓'),900);
+  }
   // Migração: empréstimos antigos sem parcelas materializadas -> gera despesas reais.
   try{
     for(const ln of (state.accounts||[]).filter(a=>a.type==='loan')){
@@ -473,6 +498,35 @@ function accountBalance(accId){
   const a=getAccount(accId); let b=a.openingBalance||0;
   for(const t of state.txs){ if(t.accountId===accId){ b+= t.kind==='income'? t.amount : -t.amount; } }
   for(const p of state.invoicePayments){ if(p.fromAccountId===accId) b-=p.amount; }
+  return b;
+}
+
+/* ---------- SALDO REALIZADO (só o que já foi recebido/pago) ----------
+   Serve para bater com o extrato do banco. Diferente de accountBalance(),
+   que considera TUDO que foi lançado (inclusive o que ainda não caiu).
+   Regras:
+   - só entram lançamentos marcados como liquidados (settled, via checklist);
+   - despesas de CARTÃO não saem da conta: elas saem quando a fatura é paga,
+     por isso o que se desconta aqui é o pagamento da fatura (invoicePayment);
+   - fatura marcada como paga direto no checklist não tem conta de origem:
+     ela reduz o total geral, mas não uma conta específica. */
+function settledBalanceOf(accId){
+  const a=getAccount(accId); if(!a) return 0;
+  let b=a.openingBalance||0;
+  for(const t of state.txs){ if(t.accountId!==accId||!t.settled) continue;
+    b += t.kind==='income' ? t.amount : -t.amount; }
+  for(const p of state.invoicePayments){ if(p.fromAccountId===accId) b-=p.amount; }
+  return b;
+}
+function settledBalanceAll(){
+  let b=0;
+  for(const a of plainAccounts()) b+=(a.openingBalance||0);
+  for(const t of state.txs){
+    const acc=getAccount(t.accountId);
+    if(!acc||acc.type!=='account'||!t.settled) continue;
+    b += t.kind==='income' ? t.amount : -t.amount;
+  }
+  for(const p of state.invoicePayments) b-=p.amount; // faturas pagas saem do caixa
   return b;
 }
 
@@ -994,8 +1048,8 @@ function renderHome(){
   html+=`<div class="section-title">Comparativo mensal</div><div class="card"><table class="tbl">
     <tr><th>Mês</th><th>Receitas</th><th>Despesas</th><th>Saldo</th></tr>`;
   for(const h of hist.slice(-3)){const s=h.income-h.expense;
-    html+=`<tr><td>${h.label}</td><td class="up num">${fmtNum(h.income)}</td><td class="down num">${fmtNum(h.expense)}</td><td class="num ${s>=0?'up':'down'}">${fmtNum(s)}</td></tr>`;}
-  html+=`</table></div>`;
+    html+=`<tr${h.ym===ym?' style="font-weight:700"':''}><td>${h.label}</td><td class="up num">${fmtNum(h.income)}</td><td class="down num">${fmtNum(h.expense)}</td><td class="num ${s>=0?'up':'down'}">${fmtNum(s)}</td></tr>`;}
+  html+=`</table><small class="note">Receitas = lançamentos de receita + repasses de gastos de terceiros (mesmo critério dos cards acima).</small></div>`;
 
   // histórico
   html+=`<div class="section-title">Histórico (6 meses)</div><div class="card">${barsSVG(hist)}
@@ -1030,9 +1084,15 @@ function groupExpenseBySource(ym){
   for(const t of state.txs){ if(t.kind==='expense'&&!t.carryOver&&txMonthOf(t)===ym){ m[t.accountId]=(m[t.accountId]||0)+t.amount; } }
   return Object.entries(m).map(([id,value])=>{const a=getAccount(id)||{name:'?',color:'#8b97a7'};return{name:a.name,color:a.color||'#8b97a7',icon:a.type==='card'?'💳':'🏦',value};}).sort((a,b)=>b.value-a.value);
 }
+/* Histórico mensal.
+   IMPORTANTE: usa incomeEffective() (receitas lançadas + repasses de terceiros),
+   o MESMO critério dos cards do topo da Início e do relatório Excel.
+   Antes usava monthTotal(k,'income'), que ignorava os gastos de terceiros
+   lançados como contrapartida — por isso o comparativo mostrava receita a menor. */
 function monthlyHistory(ym,n){
   const arr=[];
-  for(let i=n-1;i>=0;i--){const k=addMonthsYM(ym,-i);arr.push({label:ymLabelShort(k),income:monthTotal(k,'income'),expense:monthTotal(k,'expense')});}
+  for(let i=n-1;i>=0;i--){const k=addMonthsYM(ym,-i);
+    arr.push({ym:k,label:ymLabelShort(k),income:incomeEffective(k),expense:expenseTotal(k)});}
   return arr;
 }
 function daysUntil(iso){const a=parseDate(iso),b=parseDate(todayISO());return Math.round((a-b)/86400000);}
@@ -1109,22 +1169,103 @@ function barsSVG(hist){
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">${bars}${labels}</svg>`;
 }
 
-/* =================== TRANSAÇÕES =================== */
+/* =================== TRANSAÇÕES ===================
+   Filtros da aba Lançamentos: busca livre, tipo, fonte (conta/cartão) e
+   intervalo de datas. O resumo filtrado mostra Receitas − Despesas = Saldo. */
+let txFilter={q:'', type:'all', src:'all', from:'', to:'', open:false};
+// normaliza texto p/ busca: minúsculas e sem acento ("farmacia" acha "Farmácia")
+function norm(s){return String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();}
+function setTxType(t){txFilter.type=t;renderTx();}
+function toggleTxFilters(){txFilter.open=!txFilter.open;renderTx();}
+function clearTxFilters(){txFilter={q:'',type:'all',src:'all',from:'',to:'',open:true};renderTx();}
+function txFilterActive(){return !!(txFilter.q.trim()||txFilter.type!=='all'||txFilter.src!=='all'||txFilter.from||txFilter.to);}
+
 function renderTx(){
   const ym=state.ui.month;
-  const list=state.txs.filter(t=>txMonthOf(t)===ym).sort((a,b)=>b.date.localeCompare(a.date)||b.id.localeCompare(a.id));
-  const inc=incomeEffective(ym), exp=monthTotal(ym,'expense');
-  let html=`<div class="card"><div class="pills" style="margin-top:0">
-    <div class="pill"><div class="t"><span class="dot bg-up"></span>Receitas</div><div class="v up num">${fmtBRL(inc)}</div></div>
-    <div class="pill"><div class="t"><span class="dot bg-down"></span>Despesas</div><div class="v down num">${fmtBRL(exp)}</div></div>
+  const base=state.txs.filter(t=>txMonthOf(t)===ym);
+  const incM=incomeEffective(ym), expM=monthTotal(ym,'expense'); const saldoM=incM-expM;
+
+  // aplica filtros
+  let list=base.slice();
+  if(txFilter.type!=='all') list=list.filter(t=>t.kind===txFilter.type);
+  if(txFilter.src!=='all')  list=list.filter(t=>t.accountId===txFilter.src);
+  if(txFilter.from)         list=list.filter(t=>t.date>=txFilter.from);
+  if(txFilter.to)           list=list.filter(t=>t.date<=txFilter.to);
+  const q=norm(txFilter.q);
+  if(q) list=list.filter(t=>{
+    const cat=getCategory(t.categoryId), acc=getAccount(t.accountId);
+    return norm([t.description,t.note,t.thirdParty,cat&&cat.name,acc&&acc.name,fmtNum(t.amount)]
+      .filter(Boolean).join(' ')).includes(q);
+  });
+  list.sort((a,b)=>b.date.localeCompare(a.date)||(b.id||'').localeCompare(a.id||''));
+
+  const fInc=list.filter(t=>t.kind==='income').reduce((s,t)=>s+t.amount,0);
+  const fExp=list.filter(t=>t.kind==='expense').reduce((s,t)=>s+t.amount,0);
+  const fSaldo=fInc-fExp;
+  const active=txFilterActive();
+
+  // resumo do mês (mesmo critério da Início: receita inclui repasse de terceiros)
+  let html=`<div class="card"><div class="pills" style="margin-top:0;flex-wrap:wrap">
+    <div class="pill" style="min-width:104px"><div class="t"><span class="dot bg-up"></span>Receitas</div><div class="v up num">${fmtBRL(incM)}</div></div>
+    <div class="pill" style="min-width:104px"><div class="t"><span class="dot bg-down"></span>Despesas</div><div class="v down num">${fmtBRL(expM)}</div></div>
+    <div class="pill" style="min-width:104px"><div class="t">💰 Saldo</div><div class="v num ${saldoM>=0?'up':'down'}">${fmtBRL(saldoM)}</div></div>
   </div></div>`;
-  html+=`<div class="section-title">Lançamentos de ${ymLabel(ym)}</div>`;
+
+  // busca + filtros
+  html+=`<div class="card">
+    <div class="field" style="margin-bottom:8px">
+      <input id="txQ" placeholder="🔎 Buscar descrição, obs, categoria, conta, valor..." value="${escapeHTML(txFilter.q)}"></div>
+    <div class="seg" style="margin-bottom:8px">
+      <button class="${txFilter.type==='all'?'on':''}" onclick="setTxType('all')">Tudo</button>
+      <button class="${txFilter.type==='income'?'on income':''}" onclick="setTxType('income')">Receitas</button>
+      <button class="${txFilter.type==='expense'?'on expense':''}" onclick="setTxType('expense')">Despesas</button>
+    </div>
+    <div class="between">
+      <button class="btn ghost sm" onclick="toggleTxFilters()">${txFilter.open?'▲ Ocultar filtros':'▼ Mais filtros'}${active?' •':''}</button>
+      ${active?'<button class="btn ghost sm" onclick="clearTxFilters()">✕ Limpar</button>':''}
+    </div>`;
+  if(txFilter.open){
+    html+=`<div class="field" style="margin-top:10px"><label>Fonte (conta / cartão)</label>
+      <select id="txSrc"><option value="all" ${txFilter.src==='all'?'selected':''}>Todas as fontes</option>
+      ${state.accounts.map(a=>`<option value="${a.id}" ${txFilter.src===a.id?'selected':''}>${a.type==='card'?'💳 ':(a.type==='loan'?'🏦 ':'🏦 ')}${escapeHTML(a.name)}</option>`).join('')}
+      </select></div>
+      <div class="field" style="margin-bottom:0"><div class="row2">
+        <div style="flex:1"><label>De</label><input id="txFrom" type="date" value="${txFilter.from}"></div>
+        <div style="flex:1"><label>Até</label><input id="txTo" type="date" value="${txFilter.to}"></div>
+      </div></div>`;
+  }
+  html+=`</div>`;
+
+  // resultado filtrado
+  if(active){
+    const kst='flex:1 1 calc(50% - 5px);min-width:118px';
+    html+=`<div class="card"><div class="kpi" style="flex-wrap:wrap">
+      <div class="k" style="${kst}"><div class="l">Encontrados</div><div class="n num">${list.length}</div></div>
+      <div class="k" style="${kst}"><div class="l">Saldo</div><div class="n num ${fSaldo>=0?'up':'down'}">${fmtBRL(fSaldo)}</div></div>
+      <div class="k" style="${kst}"><div class="l">Receitas</div><div class="n up num">${fmtBRL(fInc)}</div></div>
+      <div class="k" style="${kst}"><div class="l">Despesas</div><div class="n down num">${fmtBRL(fExp)}</div></div>
+    </div><small class="note">Resultado da busca (só lançamentos, sem repasse de terceiros).</small></div>`;
+  }
+
+  html+=`<div class="section-title">${active?'Resultado da busca':'Lançamentos de '+ymLabel(ym)}</div>`;
   if(list.length){
     html+=`<div class="card"><div class="list">`+list.map(txItemHTML).join('')+`</div></div>`;
+  } else if(active){
+    html+=`<div class="card empty"><span class="em">🔎</span>Nenhum lançamento encontrado com esses filtros.<br>
+      <span class="swipe-hint">Toque em “✕ Limpar” para ver tudo do mês.</span></div>`;
   } else {
     html+=`<div class="card empty"><span class="em">📄</span>Nenhum lançamento neste mês.<br><span class="swipe-hint">Toque no + para adicionar.</span></div>`;
   }
   el('view-tx').innerHTML=html;
+
+  // eventos dos filtros (busca com debounce preservando o cursor)
+  const qEl=el('txQ');
+  if(qEl) qEl.oninput=()=>{txFilter.q=qEl.value; clearTimeout(renderTx._t);
+    renderTx._t=setTimeout(()=>{const pos=qEl.selectionStart; renderTx();
+      const n=el('txQ'); if(n){n.focus(); try{n.setSelectionRange(pos,pos);}catch(e){}}},220);};
+  const sEl=el('txSrc');  if(sEl) sEl.onchange=()=>{txFilter.src=sEl.value;renderTx();};
+  const fEl=el('txFrom'); if(fEl) fEl.onchange=()=>{txFilter.from=fEl.value;renderTx();};
+  const tEl=el('txTo');   if(tEl) tEl.onchange=()=>{txFilter.to=tEl.value;renderTx();};
   el('view-tx').querySelectorAll('[data-tx]').forEach(n=>n.onclick=()=>openTxSheet(n.dataset.tx));
 }
 
@@ -1347,7 +1488,22 @@ function renderMore(){
     <input type="file" id="importFile" accept="application/json,.json" style="display:none">
     <button class="btn danger mt12" onclick="confirmClear()">🗑️ Limpar todos os dados</button>
   </div>`;
-  html+=`<small class="note">Meu Bolso · v1.1 · dados salvos localmente (localStorage). Convenção de fatura no estilo Mobills: compra após o dia de fechamento entra na fatura do mês seguinte.</small>`;
+  // ── Sobre / versão ──
+  const vPrev=state.meta&&state.meta.prevVersion;
+  html+=`<div class="card">
+    <div class="between"><b>Sobre o app</b><span class="tag ok">v${APP_VERSION}</span></div>
+    <div class="list" style="margin-top:8px">
+      <div class="item"><div class="ic" style="background:#5aa7ff">🏷️</div>
+        <div class="meta"><div class="ttl">Versão instalada</div><div class="sub">v${APP_VERSION} · ${APP_DATE}</div></div></div>
+      <div class="item"><div class="ic" style="background:#8b97a7">🗄️</div>
+        <div class="meta"><div class="ttl">Formato dos dados</div><div class="sub">esquema v${state.version||1} · chave ${STORE_KEY}${vPrev?' · veio da v'+vPrev:''}</div></div></div>
+    </div>
+    <div style="margin-top:10px"><b style="font-size:13px">Novidades desta versão</b>
+      <ul style="margin:6px 0 0 18px;padding:0;color:var(--muted);font-size:12.5px;line-height:1.55">
+      ${APP_CHANGELOG.map(c=>`<li>${escapeHTML(c)}</li>`).join('')}</ul></div>
+    <button class="btn sm mt12" style="width:100%" onclick="checkForUpdate()">🔄 Verificar atualização</button>
+    <small class="note">Dados salvos localmente (localStorage). Convenção de fatura no estilo Mobills: compra após o dia de fechamento entra na fatura do mês seguinte.</small>
+  </div>`;
 
   el('view-more').innerHTML=html;
   el('view-more').querySelectorAll('[data-cat]').forEach(n=>n.onclick=()=>openCategorySheet(n.dataset.cat));
@@ -1421,7 +1577,9 @@ function drawTxSheet(editing){
   const kind=sheetState.kind;
   const cats=state.categories.filter(c=>c.type===kind);
   const accs= kind==='expense'? state.accounts.filter(a=>a.type!=='loan') : state.accounts.filter(a=>a.type==='account');
-  const e=editing||{};
+  // Em novo lançamento, reaproveita conta/data/categoria do lançamento anterior
+  // quando o usuário usou "Salvar e lançar nova" (sheetState.prefill).
+  const e=editing||sheetState.prefill||{};
   const isCard = e.accountId && getAccount(e.accountId)?.type==='card';
   let html=`<div class="grip"></div>
     <div class="seg" style="margin-bottom:6px">
@@ -1471,24 +1629,33 @@ function drawTxSheet(editing){
   }
 
   html+=`<button class="btn primary mt8" onclick="saveTx(${editing?`'${editing.id}'`:'null'})">${editing?'Salvar alterações':'Adicionar'}</button>`;
+  if(!editing) html+=`<button class="btn mt8" onclick="saveTx(null,true)">➕ Salvar e lançar nova</button>`;
   if(editing) html+=`<button class="btn danger mt8" onclick="deleteTx('${editing.id}')">Excluir lançamento</button>`;
   html+=`<button class="btn ghost mt8" onclick="closeSheet()">Cancelar</button>`;
   openSheet(html);
   // seleção de categoria
   el('sheet').querySelectorAll('#txCats [data-c]').forEach(n=>n.onclick=()=>{el('sheet').querySelectorAll('#txCats .chip-opt').forEach(x=>x.classList.remove('on'));n.classList.add('on');sheetState.cat=n.dataset.c;});
-  if(e.categoryId) sheetState.cat=e.categoryId;
+  // só reaproveita a categoria se ela for do tipo atual (despesa x receita)
+  if(e.categoryId && getCategory(e.categoryId)?.type===kind) sheetState.cat=e.categoryId;
+  else if(sheetState.cat && getCategory(sheetState.cat)?.type!==kind) delete sheetState.cat;
   const to=el('txThirdOn'); if(to)to.onchange=()=>{el('txThird').style.display=to.checked?'block':'none';if(!to.checked)el('txThird').value='';};
   // seletor de tipo de lançamento
   const md=el('txMode');
-  if(md) md.onchange=()=>{
-    const v=md.value;
-    el('instRow').style.display   = v==='installments'?'flex':'none';
-    el('monthlyHint').style.display= v==='monthly'?'block':'none';
-    el('singleHint').style.display = v==='single'?'block':'none';
-  };
+  if(md){
+    md.onchange=()=>{
+      const v=md.value;
+      el('instRow').style.display   = v==='installments'?'flex':'none';
+      el('monthlyHint').style.display= v==='monthly'?'block':'none';
+      el('singleHint').style.display = v==='single'?'block':'none';
+    };
+    // mantém o tipo escolhido no lançamento anterior ("Salvar e lançar nova")
+    if(!editing && e.mode && e.mode!=='single'){ md.value=e.mode; md.onchange(); }
+  }
   setTimeout(()=>el('txAmt')&&el('txAmt').focus(),250);
 }
-function saveTx(editId){
+/* keepOpen = "Salvar e lançar nova": grava e reabre o formulário limpo,
+   mantendo tipo (despesa/receita), conta/cartão, data, categoria e o modo. */
+function saveTx(editId,keepOpen){
   const amount=parseMoney(el('txAmt').value);
   if(amount<=0){toast('Informe um valor');return;}
   const accountId=el('txAcc').value; if(!accountId){toast('Selecione conta ou cartão');return;}
@@ -1547,7 +1714,14 @@ function saveTx(editId){
     state.txs.push(t);
     toast(kind==='income'?'Receita adicionada ✓':'Despesa adicionada ✓');
   }
-  touchInput(); save(); closeSheet(); renderAll();
+  touchInput(); save(); renderAll();
+  if(keepOpen){
+    // reabre o formulário já preenchido com o contexto do lançamento anterior
+    resetSheet({kind, cat:categoryId, prefill:{accountId,date,categoryId,mode}});
+    drawTxSheet(null);
+    return;
+  }
+  closeSheet();
 }
 function deleteTx(id){
   const t=state.txs.find(x=>x.id===id);
@@ -1766,6 +1940,12 @@ function renderClosing(){
   const aPagar=items.filter(i=>i.dir==='out').reduce((s,i)=>s+i.amount,0);
   const pendRec=items.filter(i=>i.dir==='in'&&!i.done).reduce((s,i)=>s+i.amount,0);
   const pendPag=items.filter(i=>i.dir==='out'&&!i.done).reduce((s,i)=>s+i.amount,0);
+  // já realizado no mês (itens marcados como recebidos/pagos)
+  const recebido=items.filter(i=>i.dir==='in'&&i.done).reduce((s,i)=>s+i.amount,0);
+  const pago=items.filter(i=>i.dir==='out'&&i.done).reduce((s,i)=>s+i.amount,0);
+  const saldoMes=recebido-pago;                 // movimento líquido já realizado no mês
+  const saldoContas=settledBalanceAll();        // dinheiro em conta hoje (bate com o banco)
+  const saldoPrevisto=saldoContas+pendRec-pendPag; // projeção p/ o fim do mês
   const done=items.filter(i=>i.done).length; const pct=items.length?Math.round(done/items.length*100):0;
   let html='';
   html+=`<div class="card"><div class="between"><span>Checklist de ${ymLabel(ym)}</span><b>${done}/${items.length}</b></div>
@@ -1774,6 +1954,31 @@ function renderClosing(){
       <div class="k"><div class="l">A receber (pendente)</div><div class="n up num">${fmtBRL(pendRec)}</div></div>
       <div class="k"><div class="l">A pagar (pendente)</div><div class="n down num">${fmtBRL(pendPag)}</div></div>
     </div></div>`;
+
+  // ── SALDO ATUAL (para conferir com a conta corrente real) ──
+  const contas=plainAccounts();
+  html+=`<div class="section-title">Saldo Atual</div><div class="card">
+    <div class="kpi">
+      <div class="k"><div class="l">Recebido ✓</div><div class="n up num">${fmtBRL(recebido)}</div></div>
+      <div class="k"><div class="l">Pago ✓</div><div class="n down num">${fmtBRL(pago)}</div></div>
+      <div class="k"><div class="l">Saldo do mês</div><div class="n num ${saldoMes>=0?'up':'down'}">${fmtBRL(saldoMes)}</div></div>
+    </div>
+    <div class="between" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+      <span><b>💰 Saldo em conta hoje</b></span>
+      <b class="num ${saldoContas>=0?'up':'down'}" style="font-size:18px">${fmtBRL(saldoContas)}</b></div>
+    <div class="between" style="margin-top:6px"><span style="color:var(--muted)">Previsto no fim do mês</span>
+      <span class="num ${saldoPrevisto>=0?'up':'down'}">${fmtBRL(saldoPrevisto)}</span></div>`;
+  if(contas.length){
+    html+=`<div class="list" style="margin-top:10px">`;
+    for(const a of contas){ const sb=settledBalanceOf(a.id);
+      html+=`<div class="item"><div class="ic" style="background:${a.color||'#5aa7ff'}">🏦</div>
+        <div class="meta"><div class="ttl">${escapeHTML(a.name)}</div>
+        <div class="sub">Saldo inicial ${fmtNum(a.openingBalance||0)}</div></div>
+        <div class="amt num ${sb>=0?'up':'down'}">${fmtNum(sb)}</div></div>`;
+    }
+    html+=`</div>`;
+  }
+  html+=`<small class="note">Considera <b>saldo inicial das contas + o que você marcou como recebido − o que marcou como pago</b> (inclusive faturas quitadas), de todos os meses. Despesas no cartão só saem do saldo quando a fatura é marcada como paga. Marque os itens abaixo conforme o dinheiro entra/sai para bater com o extrato do banco.</small></div>`;
   if(!items.length){
     el('view-closing').innerHTML=html+`<div class="card empty"><span class="em">✅</span>Nenhum item previsto neste mês.<br><span class="swipe-hint">Lance receitas, despesas e faturas para vê-las aqui.</span></div>`;
     return;
@@ -1916,7 +2121,7 @@ function setTheme(t){state.settings.theme=t;save();renderAll();}
 function exportData(){
   const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob); const a=document.createElement('a');
-  a.href=url; a.download='meubolso-backup-'+todayISO()+'.json'; a.click();
+  a.href=url; a.download='meubolso-backup-v'+APP_VERSION+'-'+todayISO()+'.json'; a.click();
   setTimeout(()=>URL.revokeObjectURL(url),1000); toast('Backup exportado ✓');
 }
 function importData(ev){
@@ -2398,7 +2603,7 @@ el('mPrev').onclick=()=>{state.ui.month=addMonthsYM(state.ui.month,-1);save();re
 el('mNext').onclick=()=>{state.ui.month=addMonthsYM(state.ui.month,1);save();renderAll();};
 el('scrim').onclick=closeSheet;
 // expõe funções usadas em onclick inline
-Object.assign(window,{openAccountSheet,openCategorySheet,openLoanSheet,openTxSheet,saveTx,deleteTx,saveCard,saveAccount,saveLoan,deleteAccount,saveCategory,deleteCategory,refreshCatSeg,openCardInvoice,openPayInvoice,confirmPay,undoPay,setTheme,exportData,importData,confirmClear,drawTxSheet,closeSheet,sheetState,el,switchTab,copyBudgetFrom,exportExcel,openWhatsApp,sendWhatsApp,copyWhatsApp,toggleThird,renderInput,setInputType,addInputTx,renderLedger,setLedgerType,renderMore,driveManualSync,drivePushNow,drivePullNow,driveDisconnect,saveDriveClientId,toggleDriveAuto,copyMonthlyFromPrev,dismissMonthlyCopy,pendingMonthlyToCopy,openMonthlyCopySheet,confirmMonthlyCopy,mcpToggleAll,renderCashflow});
+Object.assign(window,{openAccountSheet,openCategorySheet,openLoanSheet,openTxSheet,saveTx,deleteTx,saveCard,saveAccount,saveLoan,deleteAccount,saveCategory,deleteCategory,refreshCatSeg,openCardInvoice,openPayInvoice,confirmPay,undoPay,setTheme,exportData,importData,confirmClear,drawTxSheet,closeSheet,sheetState,el,switchTab,copyBudgetFrom,exportExcel,openWhatsApp,sendWhatsApp,copyWhatsApp,toggleThird,renderInput,setInputType,addInputTx,renderLedger,setLedgerType,renderTx,setTxType,toggleTxFilters,clearTxFilters,renderMore,checkForUpdate,driveManualSync,drivePushNow,drivePullNow,driveDisconnect,saveDriveClientId,toggleDriveAuto,copyMonthlyFromPrev,dismissMonthlyCopy,pendingMonthlyToCopy,openMonthlyCopySheet,confirmMonthlyCopy,mcpToggleAll,renderCashflow});
 // bind dinâmico do color picker quando sheets de conta abrem
 const _openSheet=openSheet;
 openSheet=function(h){_openSheet(h);bindColorPicker();};
@@ -2412,6 +2617,21 @@ switchTab('home');
 // tenta sincronizar com o Drive ao abrir (silencioso; só se já autorizado e auto ligado)
 driveStartupSync();
 
+/* Força buscar a versão publicada no GitHub Pages: limpa o cache do PWA,
+   atualiza o service worker e recarrega. Os dados (localStorage/Drive) não
+   são tocados — só o arquivo do app. */
+async function checkForUpdate(){
+  toast('Procurando atualização...');
+  try{
+    if('caches' in window){ const ks=await caches.keys(); await Promise.all(ks.map(k=>caches.delete(k))); }
+    if('serviceWorker' in navigator){
+      const regs=await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r=>r.update().catch(()=>r.unregister())));
+    }
+  }catch(e){ console.error('checkForUpdate',e); }
+  setTimeout(()=>{ location.replace(location.pathname+'?v='+Date.now()); },600);
+}
+
 /* ============================================================
    PWA — instalável (manifest + service worker embutidos)
    Funciona quando o app é servido por HTTPS (ou localhost).
@@ -2422,6 +2642,7 @@ driveStartupSync();
     const icon = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%230e1116'/%3E%3Ctext x='256' y='352' font-size='272' text-anchor='middle' font-family='system-ui'%3E%F0%9F%92%B0%3C/text%3E%3C/svg%3E";
     const manifest = {
       name:"Meu Bolso — Controle Financeiro", short_name:"Meu Bolso",
+      version:APP_VERSION, description:"Controle financeiro pessoal v"+APP_VERSION+" ("+APP_DATE+")",
       start_url:".", scope:".", display:"standalone",
       background_color:"#0e1116", theme_color:"#0e1116", lang:"pt-BR",
       orientation:"portrait",
@@ -2437,9 +2658,14 @@ driveStartupSync();
     // Service worker: cache do próprio documento p/ abrir offline.
     if('serviceWorker' in navigator && location.protocol.startsWith('http')){
       const swCode = `
-        const CACHE='meubolso-v2';
+        const CACHE='meubolso-v${APP_VERSION}';
         self.addEventListener('install', e=>{ self.skipWaiting(); });
-        self.addEventListener('activate', e=>{ e.waitUntil(self.clients.claim()); });
+        self.addEventListener('activate', e=>{ e.waitUntil((async()=>{
+          // remove caches de versões anteriores do app
+          const ks=await caches.keys();
+          await Promise.all(ks.filter(k=>k.startsWith('meubolso-v')&&k!==CACHE).map(k=>caches.delete(k)));
+          await self.clients.claim();
+        })()); });
         self.addEventListener('fetch', e=>{
           const req=e.request;
           if(req.method!=='GET'){ return; }
