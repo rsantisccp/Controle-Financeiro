@@ -393,10 +393,11 @@ const STORE_KEY='meubolso_v1';
      do app instalado), o "Sobre" na aba Mais e o registro em meta.appVersion.
    - APP_CHANGELOG aparece no card "Sobre" como "Novidades desta versão".
    ============================================================ */
-const APP_VERSION='1.10';
+const APP_VERSION='1.11';
 const APP_DATE='01/08/2026';
 const APP_CHANGELOG=[
-  'Bloco “Saldo Atual” no Fechamento (bate com a conta corrente).',
+  'Saldo Atual simplificado: recebido − pago do mês selecionado.',
+  'Bloco “Saldo Atual” no Fechamento.',
   'Busca e filtros (tipo, fonte, período) em Lançamentos, com saldo Receitas − Despesas.',
   'Botão “Salvar e lançar nova” no formulário de lançamento.',
   'Correção: comparativo mensal e histórico agora incluem os repasses de terceiros.',
@@ -498,35 +499,6 @@ function accountBalance(accId){
   const a=getAccount(accId); let b=a.openingBalance||0;
   for(const t of state.txs){ if(t.accountId===accId){ b+= t.kind==='income'? t.amount : -t.amount; } }
   for(const p of state.invoicePayments){ if(p.fromAccountId===accId) b-=p.amount; }
-  return b;
-}
-
-/* ---------- SALDO REALIZADO (só o que já foi recebido/pago) ----------
-   Serve para bater com o extrato do banco. Diferente de accountBalance(),
-   que considera TUDO que foi lançado (inclusive o que ainda não caiu).
-   Regras:
-   - só entram lançamentos marcados como liquidados (settled, via checklist);
-   - despesas de CARTÃO não saem da conta: elas saem quando a fatura é paga,
-     por isso o que se desconta aqui é o pagamento da fatura (invoicePayment);
-   - fatura marcada como paga direto no checklist não tem conta de origem:
-     ela reduz o total geral, mas não uma conta específica. */
-function settledBalanceOf(accId){
-  const a=getAccount(accId); if(!a) return 0;
-  let b=a.openingBalance||0;
-  for(const t of state.txs){ if(t.accountId!==accId||!t.settled) continue;
-    b += t.kind==='income' ? t.amount : -t.amount; }
-  for(const p of state.invoicePayments){ if(p.fromAccountId===accId) b-=p.amount; }
-  return b;
-}
-function settledBalanceAll(){
-  let b=0;
-  for(const a of plainAccounts()) b+=(a.openingBalance||0);
-  for(const t of state.txs){
-    const acc=getAccount(t.accountId);
-    if(!acc||acc.type!=='account'||!t.settled) continue;
-    b += t.kind==='income' ? t.amount : -t.amount;
-  }
-  for(const p of state.invoicePayments) b-=p.amount; // faturas pagas saem do caixa
   return b;
 }
 
@@ -1943,9 +1915,7 @@ function renderClosing(){
   // já realizado no mês (itens marcados como recebidos/pagos)
   const recebido=items.filter(i=>i.dir==='in'&&i.done).reduce((s,i)=>s+i.amount,0);
   const pago=items.filter(i=>i.dir==='out'&&i.done).reduce((s,i)=>s+i.amount,0);
-  const saldoMes=recebido-pago;                 // movimento líquido já realizado no mês
-  const saldoContas=settledBalanceAll();        // dinheiro em conta hoje (bate com o banco)
-  const saldoPrevisto=saldoContas+pendRec-pendPag; // projeção p/ o fim do mês
+  const saldoMes=recebido-pago;                 // o que sobrou em conta neste mês
   const done=items.filter(i=>i.done).length; const pct=items.length?Math.round(done/items.length*100):0;
   let html='';
   html+=`<div class="card"><div class="between"><span>Checklist de ${ymLabel(ym)}</span><b>${done}/${items.length}</b></div>
@@ -1955,30 +1925,16 @@ function renderClosing(){
       <div class="k"><div class="l">A pagar (pendente)</div><div class="n down num">${fmtBRL(pendPag)}</div></div>
     </div></div>`;
 
-  // ── SALDO ATUAL (para conferir com a conta corrente real) ──
-  const contas=plainAccounts();
+  // ── SALDO ATUAL DO MÊS: só o que foi marcado como recebido/pago ──
   html+=`<div class="section-title">Saldo Atual</div><div class="card">
     <div class="kpi">
       <div class="k"><div class="l">Recebido ✓</div><div class="n up num">${fmtBRL(recebido)}</div></div>
       <div class="k"><div class="l">Pago ✓</div><div class="n down num">${fmtBRL(pago)}</div></div>
-      <div class="k"><div class="l">Saldo do mês</div><div class="n num ${saldoMes>=0?'up':'down'}">${fmtBRL(saldoMes)}</div></div>
     </div>
     <div class="between" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
-      <span><b>💰 Saldo em conta hoje</b></span>
-      <b class="num ${saldoContas>=0?'up':'down'}" style="font-size:18px">${fmtBRL(saldoContas)}</b></div>
-    <div class="between" style="margin-top:6px"><span style="color:var(--muted)">Previsto no fim do mês</span>
-      <span class="num ${saldoPrevisto>=0?'up':'down'}">${fmtBRL(saldoPrevisto)}</span></div>`;
-  if(contas.length){
-    html+=`<div class="list" style="margin-top:10px">`;
-    for(const a of contas){ const sb=settledBalanceOf(a.id);
-      html+=`<div class="item"><div class="ic" style="background:${a.color||'#5aa7ff'}">🏦</div>
-        <div class="meta"><div class="ttl">${escapeHTML(a.name)}</div>
-        <div class="sub">Saldo inicial ${fmtNum(a.openingBalance||0)}</div></div>
-        <div class="amt num ${sb>=0?'up':'down'}">${fmtNum(sb)}</div></div>`;
-    }
-    html+=`</div>`;
-  }
-  html+=`<small class="note">Considera <b>saldo inicial das contas + o que você marcou como recebido − o que marcou como pago</b> (inclusive faturas quitadas), de todos os meses. Despesas no cartão só saem do saldo quando a fatura é marcada como paga. Marque os itens abaixo conforme o dinheiro entra/sai para bater com o extrato do banco.</small></div>`;
+      <span><b>💰 Saldo em conta</b></span>
+      <b class="num ${saldoMes>=0?'up':'down'}" style="font-size:20px">${fmtBRL(saldoMes)}</b></div>
+    <small class="note">Somente ${ymLabel(ym)}: o que você marcou como <b>recebido</b> menos o que marcou como <b>pago</b> na lista abaixo.</small></div>`;
   if(!items.length){
     el('view-closing').innerHTML=html+`<div class="card empty"><span class="em">✅</span>Nenhum item previsto neste mês.<br><span class="swipe-hint">Lance receitas, despesas e faturas para vê-las aqui.</span></div>`;
     return;
